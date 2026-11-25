@@ -1,0 +1,65 @@
+// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
+/*
+ * Samsung Galaxy S10+ (beyond2lte/SM-G975F) device tree source
+ *
+ * Copyright (c) 2026 chiffathefox <chiffathefoxx@gmail.com>
+ */
+
+/dts-v1/;
+#include "exynos9820-common.dtsi"
+
+/ {
+	model = "Samsung Galaxy S10+ (SM-G975F)";
+	compatible = "samsung,beyond2lte", "samsung,exynos9820";
+	chassis-type = "handset";
+
+	/* Real DRAM layout measured from the recovery kernel (/proc/iomem).
+	 * Holes between banks: S-Boot/loader remnants and modem carveouts. */
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x3ab00000>,
+		      <0x0 0xc0000000 0x20000000>,
+		      <0x0 0xe1900000 0x1e700000>,
+		      <0x8 0x80000000 0x80000000>,
+		      <0x9 0x00000000 0x80000000>,
+		      <0x9 0x80000000 0x80000000>;
+	};
+
+	chosen {
+		/* Android boot args. S-Boot normally supplies these; uniLoader
+		 * passes only our DTB, so they live here. hardware=exynos9820
+		 * matches the ROM's fstab.exynos9820 (Samsung platform name). */
+		bootargs = "console=tty0 loglevel=4 printk.devkmsg=on androidboot.hardware=exynos9820 androidboot.super_partition=system androidboot.boot_devices=soc@0/13d60000.ufs androidboot.verifiedbootstate=orange androidboot.selinux=permissive androidboot.serialno=beyond2lte001 firmware_class.path=/vendor/firmware brcmfmac.roamoff=1 pd_ignore_unused clk_ignore_unused";
+
+		framebuffer0: framebuffer@ca000000 {
+			compatible = "simple-framebuffer";
+			reg = <0x0 0xca000000 (1440 * 3040 * 4)>;
+			width = <1440>;
+			height = <3040>;
+			stride = <(1440 * 4)>;
+			/* Hardware FB is XRGB8888; declare a8b8g8r8 so simpledrm's
+			 * xrgb8888_to_abgr8888 blit swaps Android's RGBA R<->B channels. */
+			format = "a8b8g8r8";
+			panel = <&panel>;
+
+			/* Dummy panel for simple-framebuffer dimension info */
+			panel: dummy-panel {
+				width-mm = <70>;
+				height-mm = <147>;
+			};
+		};
+	};
+};
+
+&battery {
+	compatible = "simple-battery";
+	constant-charge-current-max-microamp = <2850000>;
+	charge-full-design-microamp-hours = <4000000>;
+};
+
+&decon {
+	memory-region = <&fb_region>;
+	width-mm = <70>;
+	height-mm = <147>;
+	status = "okay";
+};

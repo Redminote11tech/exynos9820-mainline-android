@@ -1,0 +1,29 @@
+on post-fs
+    symlink /dev/block/platform/soc@0/13d60000.ufs /dev/block/platform/13d60000.ufs
+    symlink /dev/block/by-name/persistent /dev/block/persistent
+    chown system system /dev/block/by-name/persistent
+    chmod 0660 /dev/block/by-name/persistent
+
+on post-fs-data
+    setprop persist.sys.usb.config adb
+
+on boot
+    symlink /dev/block/platform/soc@0/13d60000.ufs /dev/block/platform/13d60000.ufs
+    symlink /dev/block/by-name/persistent /dev/block/persistent
+    setprop sys.usb.config adb
+
+on property:sys.usb.ffs.ready=1
+    write /config/usb_gadget/g1/UDC "none"
+    write /config/usb_gadget/g1/idVendor 0x18d1
+    write /config/usb_gadget/g1/idProduct 0x4ee7
+    symlink /config/usb_gadget/g1/functions/ffs.adb /config/usb_gadget/g1/configs/b.1/f1
+    write /config/usb_gadget/g1/UDC "10c00000.dwc3"
+    setprop sys.usb.state adb
+
+service vendor.hwcomposer-3 /vendor/bin/hw/android.hardware.composer.hwc3-service.slsi
+    class hal animation
+    user system
+    group graphics drmrpc
+    capabilities SYS_NICE SYS_ADMIN
+    onrestart restart surfaceflinger
+    task_profiles ServiceCapacityLow
