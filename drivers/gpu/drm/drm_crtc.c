@@ -158,7 +158,9 @@ static const struct dma_fence_ops drm_crtc_fence_ops;
 
 static struct drm_crtc *fence_to_crtc(struct dma_fence *fence)
 {
-	BUG_ON(rcu_access_pointer(fence->ops) != &drm_crtc_fence_ops);
+	if (rcu_access_pointer(fence->ops) != &drm_crtc_fence_ops ||
+	    !fence->extern_lock)
+		return NULL;
 	return container_of(fence->extern_lock, struct drm_crtc, fence_lock);
 }
 
@@ -166,14 +168,14 @@ static const char *drm_crtc_fence_get_driver_name(struct dma_fence *fence)
 {
 	struct drm_crtc *crtc = fence_to_crtc(fence);
 
-	return crtc->dev->driver->name;
+	return crtc ? crtc->dev->driver->name : "drm_crtc";
 }
 
 static const char *drm_crtc_fence_get_timeline_name(struct dma_fence *fence)
 {
 	struct drm_crtc *crtc = fence_to_crtc(fence);
 
-	return crtc->timeline_name;
+	return crtc ? crtc->timeline_name : "signaled";
 }
 
 static const struct dma_fence_ops drm_crtc_fence_ops = {
