@@ -293,6 +293,45 @@
 		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
 		samsung,pin-drv = <3>;
 	};
+
+	uart1_bus: uart1-bus-pins {
+		samsung,pins = "gpq0-3", "gpq0-2", "gpq0-1", "gpq0-0";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_2>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
+		samsung,pin-drv = <0>;
+	};
+
+	bt_hostwake: bt-hostwake-pins {
+		samsung,pins = "gpa2-3";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
+	};
+
+	shub_host_req: shub-host-req-pins {
+		samsung,pins = "gpa1-7";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
+	};
+
+	shub_ap_sleep: shub-ap-sleep-pins {
+		samsung,pins = "gpa0-5";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+	};
+
+	shub_int: shub-int-pins {
+		samsung,pins = "gpa4-0";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_INPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+	};
+};
+
+&pinctrl_cmgp {
+	bt_en: bt-en-pins {
+		samsung,pins = "gpm8-0";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+	};
 };
 
 &pinctrl_peric0 {
@@ -324,6 +363,30 @@
 		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
 		samsung,pin-drv = <0>;
 	};
+
+	bt_btwake: bt-btwake-pins {
+		samsung,pins = "gpg2-0";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+	};
+
+	shub_pwr_en: shub-pwr-en-pins {
+		samsung,pins = "gpg0-2";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
+	};
+
+	shub_mcu_req: shub-mcu-req-pins {
+		samsung,pins = "gpg4-1";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+	};
+
+	shub_mcu_resp: shub-mcu-resp-pins {
+		samsung,pins = "gpg4-2";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_INPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+	};
 };
 
 &pinctrl_peric1 {
@@ -332,6 +395,72 @@
 		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
 		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
 		samsung,pin-drv = <3>;
+	};
+
+	spi17_bus: spi17-bus-pins {
+		samsung,pins = "gph0-2", "gph0-1", "gph0-0";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_2>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-drv = <0>;
+	};
+
+	spi17_cs: spi17-cs-pins {
+		samsung,pins = "gph0-3";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
+		samsung,pin-drv = <0>;
+	};
+};
+
+&usi_uart_bt {
+	samsung,mode = <USI_MODE_UART>;
+	samsung,clkreq-on;
+	status = "okay";
+};
+
+&serial1 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart1_bus>;
+	status = "okay";
+
+	bluetooth {
+		compatible = "brcm,bcm4375-bt";
+		pinctrl-names = "default";
+		pinctrl-0 = <&bt_en &bt_btwake &bt_hostwake>;
+		shutdown-gpios = <&gpm8 0 GPIO_ACTIVE_HIGH>;
+		device-wakeup-gpios = <&gpg2 0 GPIO_ACTIVE_HIGH>;
+		host-wakeup-gpios = <&gpa2 3 GPIO_ACTIVE_HIGH>;
+		max-speed = <3000000>;
+	};
+};
+
+&usi16 {
+	samsung,mode = <USI_MODE_SPI>;
+	status = "okay";
+};
+
+&spi17 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi17_bus &spi17_cs>;
+	cs-gpios = <&gph0 3 GPIO_ACTIVE_LOW>;
+	status = "okay";
+
+	sensorhub@0 {
+		compatible = "brcm,bcm4775-shub";
+		reg = <0>;
+		spi-max-frequency = <25000000>;
+		spi-cpol;
+		spi-cpha;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&shub_host_req &shub_ap_sleep &shub_int
+			     &shub_pwr_en &shub_mcu_req &shub_mcu_resp>;
+		vdd-supply = <&ldo21m>;
+		pwr-en-gpios = <&gpg0 2 GPIO_ACTIVE_HIGH>;
+		mcu-req-gpios = <&gpg4 1 GPIO_ACTIVE_HIGH>;
+		mcu-resp-gpios = <&gpg4 2 GPIO_ACTIVE_HIGH>;
+		host-req-gpios = <&gpa1 7 GPIO_ACTIVE_HIGH>;
+		ap-sleep-gpios = <&gpa0 5 GPIO_ACTIVE_HIGH>;
 	};
 };
 

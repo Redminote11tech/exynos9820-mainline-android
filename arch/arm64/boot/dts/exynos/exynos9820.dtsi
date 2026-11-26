@@ -1432,6 +1432,73 @@
 			};
 		};
 
+		usi_uart_bt: usi@108400c0 {
+			compatible = "samsung,exynos850-usi";
+			reg = <0x108400c0 0x20>;
+			ranges;
+
+			clock-names = "pclk",
+				      "ipclk";
+			clocks = <&cmu_peric1 CLK_GOUT_PERIC1_UART_BT_PCLK>,
+				 <&cmu_peric1 CLK_GOUT_PERIC1_UART_BT_IPCLK>;
+
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			samsung,sysreg = <&sysreg_peric1 0x1000>;
+			status = "disabled";
+
+			serial1: serial@10840000 {
+				compatible = "samsung,exynos7870-uart",
+					     "samsung,exynos8895-uart";
+				reg = <0x10840000 0xc0>;
+				interrupts = <GIC_SPI 408 IRQ_TYPE_LEVEL_HIGH>;
+
+				clock-names = "uart",
+					      "clk_uart_baud0";
+				clocks = <&cmu_peric1 CLK_GOUT_PERIC1_UART_BT_PCLK>,
+					 <&cmu_peric1 CLK_GOUT_PERIC1_UART_BT_IPCLK>;
+
+				samsung,uart-fifosize = <256>;
+				status = "disabled";
+			};
+		};
+
+		usi16: usi@109700c0 {
+			compatible = "samsung,exynos850-usi";
+			reg = <0x109700c0 0x20>;
+			ranges;
+
+			clock-names = "pclk",
+				      "ipclk";
+			clocks = <&cmu_peric1 CLK_GOUT_PERIC1_USI16_USI_PCLK>,
+				 <&cmu_peric1 CLK_GOUT_PERIC1_USI16_USI_IPCLK>;
+
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			samsung,sysreg = <&sysreg_peric1 0x1048>;
+			status = "disabled";
+
+			spi17: spi@10970000 {
+				compatible = "samsung,exynos850-spi";
+				reg = <0x10970000 0x30>;
+				interrupts = <GIC_SPI 426 IRQ_TYPE_LEVEL_HIGH>;
+
+				clock-names = "spi",
+					      "spi_busclk0";
+				clocks = <&cmu_peric1 CLK_GOUT_PERIC1_USI16_USI_PCLK>,
+					 <&cmu_peric1 CLK_GOUT_PERIC1_USI16_USI_IPCLK>;
+
+				num-cs = <1>;
+				samsung,spi-src-clk = <0>;
+
+				#address-cells = <1>;
+				#size-cells = <0>;
+				status = "disabled";
+			};
+		};
+
 		usi17_i2c: usi@109a00c0 {
 			compatible = "samsung,exynos850-usi";
 			reg = <0x109a00c0 0x20>;

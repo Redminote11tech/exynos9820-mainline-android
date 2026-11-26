@@ -203,6 +203,14 @@
 				regulator-boot-on;
 			};
 
+			ldo21m: ldo21m {
+				regulator-name = "vdd_mcu_1p8";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
 			ldo18m: ldo18m {
 				regulator-name = "vdd_codec_1p2";
 				regulator-min-microvolt = <1200000>;
