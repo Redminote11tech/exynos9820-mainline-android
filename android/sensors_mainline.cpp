@@ -665,9 +665,10 @@ static bool read_sensor_sample(const SensorEntry& s, AidlEvent* ev, float* outSc
             }
             ev->timestamp = boottime_ns();
             ev->payload.tag = TAG_VEC3;
-            /* BCM4775 hub reports in Android portrait axes directly (+X right, +Y up, +Z out) */
-            ev->payload.u.vec3.x      = (float)((double)rx * s.scale);
-            ev->payload.u.vec3.y      = (float)((double)ry * s.scale);
+            /* Beyond2lte (S10+) LSM6DSO PCB is rotated 90 deg CW around +Z vs Android portrait:
+             * raw_x = -9.8 m/s^2 when upright portrait -> android_x = +ry, android_y = -rx, android_z = +rz */
+            ev->payload.u.vec3.x      = (float)((double)ry * s.scale);
+            ev->payload.u.vec3.y      = (float)(-(double)rx * s.scale);
             ev->payload.u.vec3.z      = (float)((double)rz * s.scale);
             ev->payload.u.vec3.status = SENSOR_STATUS_ACCURACY_HIGH;
             return true;
