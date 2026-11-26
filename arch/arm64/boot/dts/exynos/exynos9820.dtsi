@@ -1124,6 +1124,9 @@
 				     "samsung,exynos7-pmu",
 				     "syscon";
 			reg = <0x15860000 0x10000>;
+			#clock-cells = <1>;
+			clock-names = "clkout1";
+			clocks = <&oscclk>;
 
 			google,pmu-intr-gen-syscon = <&pmu_intr_gen>;
 
@@ -1158,6 +1161,7 @@
 			reg = <0x15861900 0x20>;
 			#power-domain-cells = <0>;
 			label = "AUD";
+			samsung,tzpc-base = <0x18c62000>;
 		};
 
 		pd_npu0: power-domain@15861d00 {
@@ -1259,6 +1263,8 @@
 			reg = <0x15862600 0x20>;
 			#power-domain-cells = <0>;
 			label = "MFC";
+			/* stock need_smc, pm-domains.dtsi */
+			samsung,tzpc-base = <0x18820204>;
 		};
 
 		pd_vts: power-domain@15862a80 {
@@ -1391,6 +1397,153 @@
 			reg = <0x18c60000 0x1000>;
 		};
 
+		usi01_usi: usi@104700c0 {
+			compatible = "samsung,exynos850-usi";
+			reg = <0x104700c0 0x20>;
+			ranges;
+
+			clock-names = "pclk",
+				      "ipclk";
+			clocks = <&cmu_peric0 CLK_GOUT_PERIC0_USI01_USI_PCLK>,
+				 <&cmu_peric0 CLK_GOUT_PERIC0_USI01_USI_IPCLK>;
+
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			samsung,sysreg = <&sysreg_peric0 0x100c>;
+			status = "disabled";
+
+			spi2: spi@10470000 {
+				compatible = "samsung,exynos850-spi";
+				reg = <0x10470000 0x30>;
+				interrupts = <GIC_SPI 384 IRQ_TYPE_LEVEL_HIGH>;
+
+				clock-names = "spi",
+					      "spi_busclk0";
+				clocks = <&cmu_peric0 CLK_GOUT_PERIC0_USI01_USI_PCLK>,
+					 <&cmu_peric0 CLK_GOUT_PERIC0_USI01_USI_IPCLK>;
+
+				num-cs = <1>;
+				samsung,spi-src-clk = <0>;
+
+				#address-cells = <1>;
+				#size-cells = <0>;
+				status = "disabled";
+			};
+		};
+
+		usi17_i2c: usi@109a00c0 {
+			compatible = "samsung,exynos850-usi";
+			reg = <0x109a00c0 0x20>;
+			ranges;
+
+			clock-names = "pclk",
+				      "ipclk";
+			clocks = <&cmu_peric1 CLK_GOUT_PERIC1_USI17_I2C_PCLK>,
+				 <&cmu_peric1 CLK_GOUT_PERIC1_USI17_I2C_IPCLK>;
+
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			samsung,sysreg = <&sysreg_peric1 0x1050>;
+			status = "disabled";
+
+			hsi2c_38: i2c@109a0000 {
+				compatible = "samsung,exynosautov9-hsi2c";
+				reg = <0x109a0000 0xc0>;
+				interrupts = <GIC_SPI 428 IRQ_TYPE_LEVEL_HIGH>;
+
+				clock-names = "hsi2c",
+					      "hsi2c_pclk";
+				clocks = <&cmu_peric1 CLK_GOUT_PERIC1_USI17_I2C_IPCLK>,
+					 <&cmu_peric1 CLK_GOUT_PERIC1_USI17_I2C_PCLK>;
+
+				#address-cells = <1>;
+				#size-cells = <0>;
+				status = "disabled";
+			};
+		};
+
+		sysmmu_aud: iommu@18e00000 {
+			compatible = "samsung,exynos-sysmmu";
+			reg = <0x18e00000 0x9000>;
+			interrupts = <GIC_SPI 48 IRQ_TYPE_LEVEL_HIGH>;
+			power-domains = <&pd_aud>;
+			samsung,sysmmu-version = <7 0>;
+			#iommu-cells = <0>;
+		};
+
+		abox: audio-controller@18c50000 {
+			compatible = "samsung,exynos9820-abox";
+			reg = <0x18c50000 0x10000>,
+			      <0x18c00000 0x10000>,
+			      <0x18d00000 0x59000>,
+			      <0x18ce0000 0x10000>,
+			      <0x18c10000 0x10000>,
+			      <0x18cf1000 0x1000>,
+			      <0x18cf2000 0x1004>;
+			reg-names = "sfr", "cmu", "sram", "timer", "sysreg",
+				    "gicd", "gicc";
+			interrupts = <GIC_SPI 46 IRQ_TYPE_EDGE_RISING>;
+			iommus = <&sysmmu_aud>;
+			power-domains = <&pd_aud>;
+			samsung,pmu-syscon = <&pmu_system_controller>;
+			#sound-dai-cells = <1>;
+			status = "disabled";
+		};
+
+		cmu_mfc: clock-controller@18800000 {
+			compatible = "samsung,exynos9820-cmu-mfc";
+			reg = <0x18800000 0x10000>;
+			#clock-cells = <1>;
+
+			clock-names = "oscclk", "bus", "wfd";
+			clocks = <&oscclk>,
+				 <&cmu_top CLK_DOUT_CMU_MFC_MFC>,
+				 <&cmu_top CLK_DOUT_CMU_MFC_WFD>;
+			assigned-clocks = <&cmu_mfc CLK_MOUT_MFC_MFC_USER>,
+					  <&cmu_mfc CLK_MOUT_MFC_WFD_USER>,
+					  <&cmu_mfc CLK_DOUT_MFC_BUSP>;
+			assigned-clock-parents = <&cmu_top CLK_DOUT_CMU_MFC_MFC>,
+						 <&cmu_top CLK_DOUT_CMU_MFC_WFD>,
+						 <0>;
+			assigned-clock-rates = <0>, <0>, <33333334>;	/* S-Boot: /4 */
+			power-domains = <&pd_mfc>;
+		};
+
+		sysmmu_mfc0: iommu@18890000 {
+			compatible = "samsung,exynos-sysmmu";
+			reg = <0x18890000 0x9000>;
+			interrupts = <GIC_SPI 343 IRQ_TYPE_LEVEL_HIGH>;
+			clock-names = "sysmmu";
+			clocks = <&cmu_mfc CLK_GOUT_MFC_SYSMMU_MFCD0_CLK>;
+			power-domains = <&pd_mfc>;
+			samsung,sysmmu-version = <7 3>;
+			#iommu-cells = <0>;
+		};
+
+		sysmmu_mfc1: iommu@188b0000 {
+			compatible = "samsung,exynos-sysmmu";
+			reg = <0x188b0000 0x9000>;
+			interrupts = <GIC_SPI 345 IRQ_TYPE_LEVEL_HIGH>;
+			clock-names = "sysmmu";
+			clocks = <&cmu_mfc CLK_GOUT_MFC_SYSMMU_MFCD1_CLK>;
+			power-domains = <&pd_mfc>;
+			samsung,sysmmu-version = <7 3>;
+			#iommu-cells = <0>;
+		};
+
+		mfc: video-codec@188d0000 {
+			compatible = "samsung,exynos9820-mfc";
+			reg = <0x188d0000 0x10000>;
+			interrupts = <GIC_SPI 338 IRQ_TYPE_LEVEL_HIGH>;
+			clock-names = "mfc";
+			clocks = <&cmu_mfc CLK_GOUT_MFC_MFC_ACLK>;
+			iommus = <&sysmmu_mfc0>, <&sysmmu_mfc1>;
+			power-domains = <&pd_mfc>;
+			status = "disabled";
+		};
+
 		cmu_dpu: clock-controller@19000000 {
 			compatible = "samsung,exynos9820-cmu-dpu";
 			reg = <0x19000000 0x10000>;
@@ -1420,8 +1573,9 @@
 		decon: display-controller@19030000 {
 			compatible = "samsung,exynos9820-decon-handover";
 			reg = <0x19030000 0x10000>,
-			      <0x19071000 0x1000>;
-			reg-names = "decon", "idma-gf0";
+			      <0x19071000 0x1000>,
+			      <0x19080000 0x1000>;
+			reg-names = "decon", "idma-gf0", "dsim";
 			interrupts = <GIC_SPI 183 IRQ_TYPE_LEVEL_HIGH>;
 			iommus = <&sysmmu_dpud0>;
 			status = "disabled";

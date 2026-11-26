@@ -6,7 +6,9 @@ Booting an unmodified Android 16 custom ROM (Project Infinity X) on the Samsung 
 
 - **Kernel:** Mainline Linux 7.2-rc2 (`aarch64`, built with LLVM/Clang) + KernelSU Next, packaged with `uniLoader` into a standard Samsung `boot.img`
 - **Android 16 ROM:** Boots the real encrypted `/data` partition (`fscrypt` + `dm-default-key` + TEEGRIS `tzdev` + UFS `scsi_srpmb`) without modifying `/system` or `/vendor` permanently (all Mesa/HWC/firmware overrides live in a read-only RAM `overlayfs` from `/cache/mainline-gpu`)
-- **Display (Zero-Copy 60 Hz KMS):** Native `exynos9820-decon-kms` handover driver (`1440x3040 @ 60 Hz`) scanning out directly through `SysMMU_DPUD0` with hardware TE vblank interrupts (`GIC SPI 183`), PSR, and hardware R/B channel swap in GF0 IDMA
+- **Display (Zero-Copy 60 Hz KMS + Brightness):** Native `exynos9820-decon-kms` handover driver (`1440x3040 @ 60 Hz`) scanning out directly through `SysMMU_DPUD0` with hardware TE vblank interrupts (`GIC SPI 183`), PSR, hardware R/B channel swap in GF0 IDMA, and S6E3HA9 DSIM0 brightness (`0xB1` AOR) + `DISPLAY_OFF`/`DISPLAY_ON` DPMS
+- **Audio (Stereo Speakers):** Firmware-less Exynos 9820 `ABOX` (`exynos9820-abox`), Cirrus Logic Madera `CS47L93` codec, dual `CS35L40` speaker amplifiers (`S32_LE` TDM slot width fix), `pd_aud` TZPC SMC restore, `CLKOUT0` 26 MHz MCLK, and a minimal open-source Android Primary Audio HAL (`android/audio_hw_exynos9820.c`)
+- **Hardware Video Codec (MFC v13):** Mainline `s5p-mfc` v13 (`188d0000.video-codec`) with `CMU_MFC` runtime PM, dual `sysmmu_mfc0`/`sysmmu_mfc1` IOMMUs, and `pd_mfc` TZPC SMC restore, exposing `/dev/video0` (`s5p-mfc-dec`) and `/dev/video1` (`s5p-mfc-enc`) using stock `/vendor/firmware/mfc_fw.bin`
 - **GPU (OpenGL ES 3.1 + Vulkan):**
   - Non-coherent Exynos 9820 Mali-G76 Panfrost kernel support (AArch64 stage-1 page tables + `GPU_COHERENCY_ENABLE` non-coherent programming after reset, 0 GPU faults)
   - Full vendor Mali-G76 DVFS scaling (`156 MHz` to `702 MHz`) via ACPM IPC
@@ -26,8 +28,10 @@ Booting an unmodified Android 16 custom ROM (Project Infinity X) on the Samsung 
 | Touchscreen (`s6sy761`) | Working | Smooth multitouch, reliable boot probe |
 | All 8 CPU Cores + 8 GB RAM | Working | Exynos M4 cores active, reserved memory fixed |
 | Auto-ADB (`max77705` MUIC) | Working | Enumerates on warm boot without replug |
-| Display Brightness (S6E3HA9) | TODO | Needs DSIM0 DCS brightness + Lights HAL wiring |
-| Audio (`ABOX`), Bluetooth, Camera, RIL, S2R | TODO | Planned next milestones |
+| Display Brightness & Screen Off (S6E3HA9) | Working | DSIM0 `0xB1` AOR dimming + `0x28`/`0x29` DPMS |
+| Stereo Speaker Audio (`ABOX` + `CS35L40`) | Working | `hw:0,1` 48 kHz stereo `S32_LE` + custom Android Audio HAL |
+| Hardware Video Codec (`s5p-mfc` v13) | Kernel Working | `/dev/video0` & `/dev/video1` live with `mfc_fw.bin`; V4L2 Codec2 HAL TODO for Android apps |
+| Bluetooth, Camera, RIL, S2idle/S2R | TODO | Planned next milestones |
 
 ## How It Works (Why `/system` and `/vendor` Stay Untouched)
 

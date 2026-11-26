@@ -9,7 +9,9 @@
 // conjunction with runtime-pm. Support for both device-tree and non-device-tree
 // based power domain support is included.
 
+#include <linux/arm-smccc.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/err.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
@@ -31,7 +33,90 @@ struct exynos_pm_domain {
 	void __iomem *base;
 	struct generic_pm_domain pd;
 	u32 local_pwr_cfg;
+	u32 tzpc_base;
 };
+
+/*
+ * Some Exynos9820 domains (AUD, G3D, ...) have their TZPC registers reset
+ * to secure-only when the domain powers down. The secure monitor saves and
+ * restores them on request; without the restore, the first non-secure access
+ * to the block faults.
+ */
+#define EXYNOS_SMC_PREPARE_PD_ONOFF	0x82000410
+#define EXYNOS_PD_TZPC_SAVE		0
+#define EXYNOS_PD_TZPC_RESTORE		1
+#define EXYNOS_PD_TZPC_GROUP		2
+
+/* bring-up switch: lets the power-on be tested with and without the SMC */
+static bool tzpc_smc = true;
+module_param(tzpc_smc, bool, 0644);
+
+/*
+ * trace: log the PMU state word around every power-off, for bring-up. Each
+ * line is flushed before the next register access: netconsole prints from a
+ * thread, and a stall takes whatever it has not sent yet.
+ */
+static bool trace;
+module_param(trace, bool, 0644);
+
+#define pd_trace(fmt, ...)					\
+	do {							\
+		if (trace) {					\
+			pr_info(fmt, ##__VA_ARGS__);		\
+			pr_flush(200, false);			\
+		}						\
+	} while (0)
+
+static int exynos_pd_tzpc(struct exynos_pm_domain *pd, unsigned long mode)
+{
+	struct arm_smccc_res res;
+
+	if (!tzpc_smc) {
+		pr_info("Power domain %s: TZPC SMC skipped\n", pd->pd.name);
+		return 0;
+	}
+
+	pr_info("Power domain %s: TZPC %s SMC\n", pd->pd.name,
+		mode == EXYNOS_PD_TZPC_SAVE ? "save" : "restore");
+	if (trace)
+		pr_flush(200, false);
+	arm_smccc_smc(EXYNOS_SMC_PREPARE_PD_ONOFF, mode, pd->tzpc_base,
+		      EXYNOS_PD_TZPC_GROUP, 0, 0, 0, 0, &res);
+	if (res.a0) {
+		pr_err("Power domain %s TZPC %s failed: %ld\n", pd->pd.name,
+		       mode == EXYNOS_PD_TZPC_SAVE ? "save" : "restore",
+		       (long)res.a0);
+		return -EIO;
+	}
+
+	return 0;
+}
+
+/*
+ * A power-down that times out is still pending: the PMU keeps working on it
+ * with CONFIGURATION at 0 while genpd counts the domain as on, so nothing
+ * ever asks for it back. Ask for the domain back, and pair the TZPC save
+ * that went before with a restore.
+ */
+static void exynos_pd_cancel_off(struct exynos_pm_domain *pd)
+{
+	void __iomem *base = pd->base;
+	u32 states = readl_relaxed(base + 0x8), val;
+	int ret;
+
+	writel_relaxed(pd->local_pwr_cfg, base);
+	ret = readl_poll_timeout(base + 0x4, val,
+				 (val & pd->local_pwr_cfg) == pd->local_pwr_cfg,
+				 20, 20000);
+	if (ret)
+		pr_err("Power domain %s: off request not withdrawn (status 0x%x)\n",
+		       pd->pd.name, val);
+	else
+		pd_trace("Power domain %s: off withdrawn, states 0x%x -> 0x%x\n",
+			 pd->pd.name, states, readl_relaxed(base + 0x8));
+	if (pd->tzpc_base)
+		exynos_pd_tzpc(pd, EXYNOS_PD_TZPC_RESTORE);
+}
 
 static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
 {
@@ -43,22 +128,40 @@ static int exynos_pd_power(struct generic_pm_domain *domain, bool power_on)
 	pd = container_of(domain, struct exynos_pm_domain, pd);
 	base = pd->base;
 
+	if (!power_on && pd->tzpc_base) {
+		int ret = exynos_pd_tzpc(pd, EXYNOS_PD_TZPC_SAVE);
+
+		if (ret)
+			return ret;
+	}
+
 	pwr = power_on ? pd->local_pwr_cfg : 0;
+	pd_trace("Power domain %s: %s request, states 0x%x\n", domain->name,
+		 power_on ? "on" : "off", readl_relaxed(base + 0x8));
 	writel_relaxed(pwr, base);
 
-	/* Wait max 1ms */
-	timeout = 10;
+	/* Wait max 1ms, 20ms on 9820: AUD can take longer to power down */
+	timeout = pd->local_pwr_cfg == 0x1 ? 200 : 10;
 
 	while ((readl_relaxed(base + 0x4) & pd->local_pwr_cfg) != pwr) {
 		if (!timeout) {
 			op = (power_on) ? "enable" : "disable";
 			pr_err("Power domain %s %s failed\n", domain->name, op);
+			if (trace)
+				pr_flush(200, false);
+			if (!power_on)
+				exynos_pd_cancel_off(pd);
 			return -ETIMEDOUT;
 		}
 		timeout--;
 		cpu_relax();
 		usleep_range(80, 100);
 	}
+	pd_trace("Power domain %s: %s, states 0x%x\n", domain->name,
+		 power_on ? "on" : "off", readl_relaxed(base + 0x8));
+
+	if (power_on && pd->tzpc_base)
+		return exynos_pd_tzpc(pd, EXYNOS_PD_TZPC_RESTORE);
 
 	return 0;
 }
@@ -134,6 +237,7 @@ static int exynos_pd_probe(struct platform_device *pdev)
 	pd->pd.power_off = exynos_pd_power_off;
 	pd->pd.power_on = exynos_pd_power_on;
 	pd->local_pwr_cfg = pm_domain_cfg->local_pwr_cfg;
+	of_property_read_u32(np, "samsung,tzpc-base", &pd->tzpc_base);
 
 	/*
 	 * Some Samsung platforms with bootloaders turning on the splash-screen

@@ -148,4 +148,22 @@ config SND_SOC_SAMSUNG_MIDAS_WM1811
 	help
 	  Say Y if you want to add support for SoC audio on the Midas boards.
 
+config SND_SOC_SAMSUNG_EXYNOS9820_ABOX
+	tristate "Exynos 9820 ABOX audio (firmware-less)"
+	depends on ARCH_EXYNOS || COMPILE_TEST
+	select MFD_SYSCON
+	help
+	  Plays PCM through the Exynos 9820 ABOX block (RDMA to UAIF)
+	  without the ABOX firmware.
+
+config SND_SOC_SAMSUNG_S10E_MADERA
+	tristate "SoC audio support for Galaxy S10 series (CS47L93)"
+	depends on MFD_CS47L92 && (ARCH_EXYNOS || COMPILE_TEST)
+	select SND_SOC_CS47L92
+	select SND_SOC_SAMSUNG_EXYNOS9820_ABOX
+	select SND_SOC_CS35L41_I2C
+	help
+	  Say Y if you want to add support for the CS47L93 codec and dual
+	  CS35L40 speaker amplifiers on Exynos 9820 Galaxy S10 devices.
+
 endif #SND_SOC_SAMSUNG

@@ -9,6 +9,7 @@
  */
 
 #include <linux/aperture.h>
+#include <linux/backlight.h>
 #include <linux/bitfield.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
@@ -16,6 +17,7 @@
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -66,6 +68,19 @@
 #define IDMA_IMG_SIZE			0x0018
 #define IDMA_IN_BASE_ADDR_Y		0x0040
 
+/* DSIM0 command FIFO */
+#define DSIM_PKTHDR			0x0058
+#define DSIM_PAYLOAD			0x005c
+#define DSIM_FIFOCTRL			0x0068
+#define DSIM_FULL_PH_SFR		BIT(11)
+#define DSIM_EMPTY_PH_SFR		BIT(10)
+#define DSIM_FULL_PL_SFR		BIT(9)
+
+/* S6E3HA9 (beyond2lte) AOR brightness range from Samsung panel table */
+#define S6E3HA9_AOR_DIMMEST		0x0bc1
+#define S6E3HA9_AOR_BRIGHTEST		0x0014
+#define S6E3HA9_MAX_BRIGHTNESS		255
+
 struct decon_kms {
 	struct drm_device drm;
 	struct drm_simple_display_pipe pipe;
@@ -73,8 +88,13 @@ struct decon_kms {
 
 	void __iomem *decon;
 	void __iomem *idma;
+	void __iomem *dsim;
 	unsigned int win;
 	int irq;
+
+	struct mutex dsi_lock;
+	struct backlight_device *bl;
+	bool display_on;
 
 	u32 width;
 	u32 height;
@@ -107,6 +127,112 @@ static void rmw(void __iomem *base, u32 reg, u32 mask, u32 val)
 {
 	writel((readl(base + reg) & ~mask) | (val & mask), base + reg);
 }
+
+static int dsim_wait_clear(struct decon_kms *dk, u32 bits)
+{
+	u32 val;
+
+	return readl_poll_timeout(dk->dsim + DSIM_FIFOCTRL, val, !(val & bits),
+				  10, 100000);
+}
+
+static int dsim_dcs_write_locked(struct decon_kms *dk, const u8 *buf, size_t len)
+{
+	u32 val, hdr;
+	size_t i;
+	int ret;
+
+	if (!dk->dsim || !len)
+		return 0;
+
+	ret = dsim_wait_clear(dk, DSIM_FULL_PH_SFR);
+	if (ret)
+		return ret;
+
+	if (len == 1) {
+		hdr = 0x05 | ((u32)buf[0] << 8);
+	} else if (len == 2) {
+		hdr = 0x15 | ((u32)buf[0] << 8) | ((u32)buf[1] << 16);
+	} else {
+		for (i = 0; i < len; i += 4) {
+			size_t n = min_t(size_t, 4, len - i);
+
+			val = 0;
+			memcpy(&val, buf + i, n);
+			ret = dsim_wait_clear(dk, DSIM_FULL_PL_SFR);
+			if (ret)
+				return ret;
+			writel(le32_to_cpu((__force __le32)val),
+			       dk->dsim + DSIM_PAYLOAD);
+		}
+		hdr = 0x39 | ((u32)(len & 0xffff) << 8);
+	}
+
+	writel(hdr, dk->dsim + DSIM_PKTHDR);
+	return readl_poll_timeout(dk->dsim + DSIM_FIFOCTRL, val,
+				  val & DSIM_EMPTY_PH_SFR, 10, 100000);
+}
+
+static void s6e3ha9_set_display_locked(struct decon_kms *dk, bool on)
+{
+	static const u8 key1_on[] = { 0x9f, 0xa5, 0xa5 };
+	static const u8 key1_off[] = { 0x9f, 0x5a, 0x5a };
+	u8 cmd = on ? 0x29 : 0x28;
+
+	if (!dk->dsim || dk->display_on == on)
+		return;
+
+	dsim_dcs_write_locked(dk, key1_on, sizeof(key1_on));
+	dsim_dcs_write_locked(dk, &cmd, 1);
+	dsim_dcs_write_locked(dk, key1_off, sizeof(key1_off));
+	dk->display_on = on;
+}
+
+static void s6e3ha9_set_aor_locked(struct decon_kms *dk, int level)
+{
+	static const u8 key2_on[] = { 0xf0, 0x5a, 0x5a };
+	static const u8 key2_off[] = { 0xf0, 0xa5, 0xa5 };
+	static const u8 gamma_upd[] = { 0xf7, 0x03 };
+	u32 aor;
+	u8 b1[3];
+
+	if (!dk->dsim)
+		return;
+
+	level = clamp(level, 1, S6E3HA9_MAX_BRIGHTNESS);
+	/* Quadratic curve so low slider values reach dark-room dimness */
+	aor = S6E3HA9_AOR_DIMMEST -
+	      (u32)((u64)(S6E3HA9_AOR_DIMMEST - S6E3HA9_AOR_BRIGHTEST) *
+		    level * level / (S6E3HA9_MAX_BRIGHTNESS * S6E3HA9_MAX_BRIGHTNESS));
+	b1[0] = 0xb1;
+	b1[1] = aor >> 8;
+	b1[2] = aor & 0xff;
+
+	dsim_dcs_write_locked(dk, key2_on, sizeof(key2_on));
+	dsim_dcs_write_locked(dk, b1, sizeof(b1));
+	dsim_dcs_write_locked(dk, gamma_upd, sizeof(gamma_upd));
+	dsim_dcs_write_locked(dk, key2_off, sizeof(key2_off));
+}
+
+static int decon_bl_update_status(struct backlight_device *bl)
+{
+	struct decon_kms *dk = bl_get_data(bl);
+	int level = backlight_get_brightness(bl);
+
+	mutex_lock(&dk->dsi_lock);
+	if (level == 0) {
+		s6e3ha9_set_display_locked(dk, false);
+	} else {
+		s6e3ha9_set_display_locked(dk, true);
+		s6e3ha9_set_aor_locked(dk, level);
+	}
+	mutex_unlock(&dk->dsi_lock);
+	return 0;
+}
+
+static const struct backlight_ops decon_bl_ops = {
+	.update_status = decon_bl_update_status,
+};
 
 static void decon_trig_kick(struct decon_kms *dk, unsigned int frames)
 {
@@ -234,12 +360,20 @@ static void decon_pipe_enable(struct drm_simple_display_pipe *pipe,
 			      struct drm_crtc_state *crtc_state,
 			      struct drm_plane_state *plane_state)
 {
+	struct decon_kms *dk = to_decon(pipe->crtc.dev);
 	const struct drm_vblank_crtc_config config = {
 		.offdelay_ms = 5000,
 		.disable_immediate = true,
 	};
 
 	drm_crtc_vblank_on_config(&pipe->crtc, &config);
+	if (dk->dsim) {
+		mutex_lock(&dk->dsi_lock);
+		s6e3ha9_set_display_locked(dk, true);
+		if (dk->bl)
+			s6e3ha9_set_aor_locked(dk, backlight_get_brightness(dk->bl));
+		mutex_unlock(&dk->dsi_lock);
+	}
 }
 
 static void decon_pipe_disable(struct drm_simple_display_pipe *pipe)
@@ -247,6 +381,11 @@ static void decon_pipe_disable(struct drm_simple_display_pipe *pipe)
 	struct decon_kms *dk = to_decon(pipe->crtc.dev);
 
 	drm_crtc_vblank_off(&pipe->crtc);
+	if (dk->dsim) {
+		mutex_lock(&dk->dsi_lock);
+		s6e3ha9_set_display_locked(dk, false);
+		mutex_unlock(&dk->dsi_lock);
+	}
 	memset(dk->boot_fb, 0, (size_t)dk->width * dk->height * 4);
 	wmb();
 	decon_scanout(dk, dk->boot_base, dk->boot_in_con, dk->boot_src_size);
@@ -454,9 +593,14 @@ static int decon_probe(struct platform_device *pdev)
 		return PTR_ERR(dk);
 	platform_set_drvdata(pdev, dk);
 	spin_lock_init(&dk->trig_lock);
+	mutex_init(&dk->dsi_lock);
 	drm = &dk->drm;
 	dk->decon = decon;
 	dk->idma = idma;
+	dk->dsim = devm_platform_ioremap_resource_byname(pdev, "dsim");
+	if (IS_ERR(dk->dsim))
+		dk->dsim = NULL;
+	dk->display_on = true;
 
 	ret = decon_check_handover(dk);
 	if (ret)
@@ -528,6 +672,22 @@ static int decon_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 	dk->registered = true;
+
+	if (dk->dsim) {
+		struct backlight_properties props = {
+			.type = BACKLIGHT_RAW,
+			.max_brightness = S6E3HA9_MAX_BRIGHTNESS,
+			.brightness = 128,
+		};
+
+		dk->bl = devm_backlight_device_register(dev, "panel", dev, dk,
+							&decon_bl_ops, &props);
+		if (IS_ERR(dk->bl)) {
+			dev_warn(dev, "failed to register panel backlight: %ld\n",
+				 PTR_ERR(dk->bl));
+			dk->bl = NULL;
+		}
+	}
 
 	drm_client_setup(drm, NULL);
 	return 0;

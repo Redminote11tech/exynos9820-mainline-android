@@ -221,6 +221,7 @@ config DRM_EXYNOS9820_DECON_KMS
 	depends on DRM && OF
 	select DRM_KMS_HELPER
 	select DRM_GEM_DMA_HELPER
+	select BACKLIGHT_CLASS_DEVICE
 	help
 	  Zero-copy handover KMS driver for Samsung Exynos 9820 DECON0 + GF0 IDMA
-	  with hardware TE vblank and PSR.
+	  with hardware TE vblank, PSR, and S6E3HA9 DSIM0 brightness/DPMS.

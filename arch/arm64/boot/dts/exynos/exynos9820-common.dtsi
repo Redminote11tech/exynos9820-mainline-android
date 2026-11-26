@@ -99,6 +99,12 @@
 			no-map;
 		};
 
+		/* ABOX audio DRAM carveout */
+		abox_fw_mem: abox-fw@c4000000 {
+			reg = <0x0 0xc4000000 0x2400000>;
+			no-map;
+		};
+
 		fb_region: framebuffer_region@ca000000 {
 			reg = <0x0 0xca000000 (1440 * 3040 * 4)>;
 			iommu-addresses = <&decon 0xca000000 (1440 * 3040 * 4)>;
@@ -189,6 +195,22 @@
 		wakeup-source;
 
 		regulators {
+			ldo17m: ldo17m {
+				regulator-name = "vdd_pmic_codec_1p8";
+				regulator-min-microvolt = <1800000>;
+				regulator-max-microvolt = <1800000>;
+				regulator-always-on;
+				regulator-boot-on;
+			};
+
+			ldo18m: ldo18m {
+				regulator-name = "vdd_codec_1p2";
+				regulator-min-microvolt = <1200000>;
+				regulator-max-microvolt = <1200000>;
+				regulator-ramp-delay = <12000>;
+				regulator-enable-ramp-delay = <5000>;
+			};
+
 			ldo19m: ldo19m {
 				regulator-name = "tsp_io";
 				regulator-min-microvolt = <1800000>;

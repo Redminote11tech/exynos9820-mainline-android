@@ -42,3 +42,7 @@ obj-$(CONFIG_SND_SOC_ARNDALE) += snd-soc-arndale.o
 obj-$(CONFIG_SND_SOC_SAMSUNG_TM2_WM5110) += snd-soc-tm2-wm5110.o
 obj-$(CONFIG_SND_SOC_SAMSUNG_ARIES_WM8994) += snd-soc-aries-wm8994.o
 obj-$(CONFIG_SND_SOC_SAMSUNG_MIDAS_WM1811) += snd-soc-midas-wm1811.o
+snd-soc-s10e-madera-y := s10e_madera.o
+snd-soc-exynos9820-abox-y := exynos9820-abox.o
+obj-$(CONFIG_SND_SOC_SAMSUNG_S10E_MADERA) += snd-soc-s10e-madera.o
+obj-$(CONFIG_SND_SOC_SAMSUNG_EXYNOS9820_ABOX) += snd-soc-exynos9820-abox.o
