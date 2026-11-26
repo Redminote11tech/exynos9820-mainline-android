@@ -637,6 +637,10 @@ static int exynos_pcie_suspend_noirq(struct device *dev)
 {
 	struct exynos_pcie *ep = dev_get_drvdata(dev);
 
+	/* On Exynos 9820 in s2idle, keep the PCIe link up while BCM4375 is in D3. */
+	if (ep->is_exynos9820)
+		return 0;
+
 	exynos_pcie_assert_core_reset(ep);
 	phy_power_off(ep->phy);
 	phy_exit(ep->phy);
@@ -651,6 +655,9 @@ static int exynos_pcie_resume_noirq(struct device *dev)
 	struct dw_pcie *pci = &ep->pci;
 	struct dw_pcie_rp *pp = &pci->pp;
 	int ret;
+
+	if (ep->is_exynos9820)
+		return 0;
 
 	ret = regulator_bulk_enable(ARRAY_SIZE(ep->supplies), ep->supplies);
 	if (ret)

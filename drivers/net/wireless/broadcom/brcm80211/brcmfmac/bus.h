@@ -86,6 +86,7 @@ struct brcmf_bus_dcmd {
  * @get_memdump: obtain device memory dump in provided buffer.
  * @get_blob: obtain a firmware blob.
  * @remove: initiate unbind of the device.
+ * @mbdata: mailbox data the dongle sent in a control completion (optional).
  *
  * This structure provides an abstract interface towards the
  * bus specific driver. For control messages to common driver
@@ -107,6 +108,7 @@ struct brcmf_bus_ops {
 	void (*debugfs_create)(struct device *dev);
 	int (*reset)(struct device *dev);
 	void (*remove)(struct device *dev);
+	void (*mbdata)(struct device *dev, u32 data);
 };
 
 
@@ -160,6 +162,8 @@ struct brcmf_bus_stats {
  * @fwvid: firmware vendor-support identifier of the device.
  * @always_use_fws_queue: bus wants use queue also when fwsignal is inactive.
  * @wowl_supported: is wowl supported by bus driver.
+ * @host_wake: the dongle has an out-of-band line that wakes the host from
+ *	suspend, so the link to the AP can stay up while the host sleeps.
  * @ops: callbacks for this bus instance.
  * @msgbuf: msgbuf protocol parameters provided by bus layer.
  * @list: member used to add this bus instance to linked list.
@@ -181,6 +185,7 @@ struct brcmf_bus {
 	enum brcmf_fwvendor fwvid;
 	bool always_use_fws_queue;
 	bool wowl_supported;
+	bool host_wake;
 
 	const struct brcmf_bus_ops *ops;
 	struct brcmf_bus_msgbuf *msgbuf;
@@ -286,6 +291,12 @@ static inline void brcmf_bus_remove(struct brcmf_bus *bus)
 	}
 
 	bus->ops->remove(bus->dev);
+}
+
+static inline void brcmf_bus_mbdata(struct brcmf_bus *bus, u32 data)
+{
+	if (bus->ops->mbdata)
+		bus->ops->mbdata(bus->dev, data);
 }
 
 /*

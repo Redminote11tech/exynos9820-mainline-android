@@ -115,16 +115,16 @@
 		 * OrangeFox recovery exposes panic/pmsg records at /sys/fs/pstore. */
 		ramoops@eb308000 {
 			compatible = "ramoops";
-			reg = <0x0 0xeb308000 0x8000>;
+			reg = <0x0 0xeb308000 0x48000>;
 			record-size = <0x4000>;
 			pmsg-size = <0x4000>;
-			console-size = <0x0>;
+			console-size = <0x40000>;
 			no-map;
 		};
 
-		/* Remainder of lower Samsung debug_snapshot block (0xeb308000..0xed210000). */
-		dss_lower@eb310000 {
-			reg = <0x0 0xeb310000 0x1f00000>;
+		/* Remainder of lower Samsung debug_snapshot block (0xeb350000..0xed210000). */
+		dss_lower@eb350000 {
+			reg = <0x0 0xeb350000 0x1ec0000>;
 			no-map;
 		};
 

@@ -17,6 +17,9 @@
 #include <linux/io.h>
 #include <linux/random.h>
 #include <linux/unaligned.h>
+#include <linux/gpio/consumer.h>
+#include <linux/gpio/machine.h>
+#include <linux/pm_wakeup.h>
 
 #include <soc.h>
 #include <chipcommon.h>
@@ -82,6 +85,18 @@ MODULE_FIRMWARE(BRCMF_FW_DEFAULT_PATH "brcmfmac*-pcie.*.txt");
 MODULE_FIRMWARE(BRCMF_FW_DEFAULT_PATH "brcmfmac*-pcie.*.bin");
 MODULE_FIRMWARE(BRCMF_FW_DEFAULT_PATH "brcmfmac*-pcie.*.clm_blob");
 MODULE_FIRMWARE(BRCMF_FW_DEFAULT_PATH "brcmfmac*-pcie.*.txcap_blob");
+
+/*
+ * In D3 the dongle signals a packet or an event for the host on an
+ * out-of-band line instead of an interrupt (Broadcom's BCMPCIE_OOB_HOST_WAKE;
+ * the NVRAM's host_wake_opt picks the chip GPIO). With it the link to the AP
+ * can stay up while the host is suspended. The device has no DT node on the
+ * boards that need it, so the line is named here, e.g. "gpa0:7" on the
+ * Galaxy S10e.
+ */
+static char *brcmf_pcie_host_wake;
+module_param_named(host_wake, brcmf_pcie_host_wake, charp, 0444);
+MODULE_PARM_DESC(host_wake, "Host-wake GPIO as <gpiochip label>:<line>");
 
 static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 	BRCMF_FW_ENTRY(BRCM_CC_43602_CHIP_ID, 0xFFFFFFFF, 43602),
@@ -221,6 +236,7 @@ static const struct brcmf_firmware_mapping brcmf_pcie_fwnames[] = {
 #define BRCMF_PCIE_SHARED_VERSION_MASK		0x00FF
 #define BRCMF_PCIE_SHARED_DMA_INDEX		0x10000
 #define BRCMF_PCIE_SHARED_DMA_2B_IDX		0x100000
+#define BRCMF_PCIE_SHARED_USE_MAILBOX		0x2000000
 #define BRCMF_PCIE_SHARED_HOSTRDY_DB1		0x10000000
 
 #define BRCMF_PCIE_FLAGS_HTOD_SPLIT		0x4000
@@ -356,8 +372,15 @@ struct brcmf_pciedev_info {
 	struct brcmf_pcie_shared_info shared;
 	wait_queue_head_t mbdata_resp_wait;
 	bool mbdata_completed;
+	bool mbdata_in_ring;	/* mailbox data goes through the control rings */
+	u32 ds_enter_reqs;	/* deep sleep requests from the dongle */
 	bool irq_allocated;
 	bool wowl_enabled;
+	struct gpiod_lookup_table *wake_lookup;
+	struct gpio_desc *wake_gpio;
+	int wake_irq;
+	atomic_t wake_armed;	/* host-wake IRQ enabled, the dongle in D3 */
+	atomic_t gone;		/* the link is dead: nothing touches the device any more */
 	u8 dma_idx_sz;
 	void *idxbuf;
 	u32 idxbuf_sz;
@@ -584,6 +607,32 @@ brcmf_pcie_read_ram32(struct brcmf_pciedev_info *devinfo, u32 mem_offset)
 }
 
 
+/*
+ * A surprise link down: every read through a dead link comes back all ones. On the S10e (BCM4375 browned out
+ * on a flat battery, 2026-11-23) the INTx handler then saw a mailbox interrupt with every bit set, the D2H rings'
+ * write indices read 0xffff, and brcmf_msgbuf_process_rx() walked off the end of the RX completion ring's buffer
+ * into unmapped vmalloc space: an oops in the IRQ thread. From the first such read on, nothing here touches the
+ * device again; the bus is down, so commands fail at once, and the PCIe host takes the device off the bus (or
+ * marks it disconnected) and scans it again once its link is back.
+ */
+static bool brcmf_pcie_gone(struct brcmf_pciedev_info *devinfo)
+{
+	return atomic_read(&devinfo->gone) || pci_dev_is_disconnected(devinfo->pdev);
+}
+
+static void brcmf_pcie_set_gone(struct brcmf_pciedev_info *devinfo, const char *what)
+{
+	struct brcmf_bus *bus = dev_get_drvdata(&devinfo->pdev->dev);
+
+	if (atomic_xchg(&devinfo->gone, 1))
+		return;
+	devinfo->state = BRCMFMAC_PCIE_STATE_DOWN;
+	if (bus)
+		brcmf_bus_change_state(bus, BRCMF_BUS_DOWN);
+	dev_err(&devinfo->pdev->dev, "the device is gone (%s), leaving it alone\n", what);
+}
+
+
 static void
 brcmf_pcie_write_ram32(struct brcmf_pciedev_info *devinfo, u32 mem_offset,
 		       u32 value)
@@ -800,6 +849,13 @@ brcmf_pcie_send_mb_data(struct brcmf_pciedev_info *devinfo, u32 htod_mb_data)
 	u32 cur_htod_mb_data;
 	u32 i;
 
+	if (brcmf_pcie_gone(devinfo))
+		return -ENODEV;
+
+	if (devinfo->mbdata_in_ring)
+		return brcmf_proto_msgbuf_send_mbdata(&devinfo->pdev->dev,
+						      htod_mb_data);
+
 	shared = &devinfo->shared;
 	addr = shared->htod_mb_data_addr;
 	cur_htod_mb_data = brcmf_pcie_read_tcm32(devinfo, addr);
@@ -810,6 +866,10 @@ brcmf_pcie_send_mb_data(struct brcmf_pciedev_info *devinfo, u32 htod_mb_data)
 
 	i = 0;
 	while (cur_htod_mb_data != 0) {
+		if (cur_htod_mb_data == 0xffffffff) {
+			brcmf_pcie_set_gone(devinfo, "H2D mailbox data");
+			return -ENODEV;
+		}
 		msleep(10);
 		i++;
 		if (i > 100)
@@ -829,26 +889,28 @@ brcmf_pcie_send_mb_data(struct brcmf_pciedev_info *devinfo, u32 htod_mb_data)
 }
 
 
-static void brcmf_pcie_handle_mb_data(struct brcmf_pciedev_info *devinfo)
+static void brcmf_pcie_process_mb_data(struct brcmf_pciedev_info *devinfo,
+				       u32 dtoh_mb_data)
 {
-	struct brcmf_pcie_shared_info *shared;
-	u32 addr;
-	u32 dtoh_mb_data;
-
-	shared = &devinfo->shared;
-	addr = shared->dtoh_mb_data_addr;
-	dtoh_mb_data = brcmf_pcie_read_tcm32(devinfo, addr);
-
-	if (!dtoh_mb_data)
-		return;
-
-	brcmf_pcie_write_tcm32(devinfo, addr, 0);
-
 	brcmf_dbg(PCIE, "D2H_MB_DATA: 0x%04x\n", dtoh_mb_data);
 	if (dtoh_mb_data & BRCMF_D2H_DEV_DS_ENTER_REQ)  {
 		brcmf_dbg(PCIE, "D2H_MB_DATA: DEEP SLEEP REQ\n");
-		brcmf_pcie_send_mb_data(devinfo, BRCMF_H2D_HOST_DS_ACK);
-		brcmf_dbg(PCIE, "D2H_MB_DATA: sent DEEP SLEEP ACK\n");
+		/*
+		 * Through the control ring the ACK really reaches the dongle,
+		 * and without the in-band device-wake handshake stock dhd uses
+		 * nothing wakes it before the next host access. Left unacked
+		 * the dongle stays awake, as it always did while the ACK went
+		 * to a TCM mailbox the firmware never reads.
+		 */
+		if (++devinfo->ds_enter_reqs == 1 || devinfo->ds_enter_reqs % 1000 == 0)
+			dev_info(&devinfo->pdev->dev,
+				 "deep sleep request %u from the dongle, %s\n",
+				 devinfo->ds_enter_reqs,
+				 devinfo->mbdata_in_ring ? "not acked" : "acked");
+		if (!devinfo->mbdata_in_ring) {
+			brcmf_pcie_send_mb_data(devinfo, BRCMF_H2D_HOST_DS_ACK);
+			brcmf_dbg(PCIE, "D2H_MB_DATA: sent DEEP SLEEP ACK\n");
+		}
 	}
 	if (dtoh_mb_data & BRCMF_D2H_DEV_DS_EXIT_NOTE)
 		brcmf_dbg(PCIE, "D2H_MB_DATA: DEEP SLEEP EXIT\n");
@@ -861,6 +923,38 @@ static void brcmf_pcie_handle_mb_data(struct brcmf_pciedev_info *devinfo)
 		brcmf_dbg(PCIE, "D2H_MB_DATA: FW HALT\n");
 		brcmf_fw_crashed(&devinfo->pdev->dev);
 	}
+}
+
+
+static void brcmf_pcie_handle_mb_data(struct brcmf_pciedev_info *devinfo)
+{
+	struct brcmf_pcie_shared_info *shared;
+	u32 addr;
+	u32 dtoh_mb_data;
+
+	shared = &devinfo->shared;
+	addr = shared->dtoh_mb_data_addr;
+	dtoh_mb_data = brcmf_pcie_read_tcm32(devinfo, addr);
+
+	if (!dtoh_mb_data)
+		return;
+	/* every bit, FW HALT and D3 ACK among them: a read over a dead link, not a message */
+	if (dtoh_mb_data == 0xffffffff) {
+		brcmf_pcie_set_gone(devinfo, "D2H mailbox data");
+		return;
+	}
+
+	brcmf_pcie_write_tcm32(devinfo, addr, 0);
+	brcmf_pcie_process_mb_data(devinfo, dtoh_mb_data);
+}
+
+
+/* bus op: mailbox data that came in a control completion (mbdata_in_ring) */
+static void brcmf_pcie_mbdata(struct device *dev, u32 data)
+{
+	struct brcmf_bus *bus = dev_get_drvdata(dev);
+
+	brcmf_pcie_process_mb_data(bus->bus_priv.pcie->devinfo, data);
 }
 
 
@@ -902,12 +996,17 @@ static void brcmf_pcie_bus_console_read(struct brcmf_pciedev_info *devinfo,
 
 	if (!error && !BRCMF_FWCON_ON())
 		return;
+	if (brcmf_pcie_gone(devinfo))
+		return;
 
 	console = &devinfo->shared.console;
 	if (!console->base_addr)
 		return;
 	addr = console->base_addr + BRCMF_CONSOLE_WRITEIDX_OFFSET;
 	newidx = brcmf_pcie_read_tcm32(devinfo, addr);
+	/* an index past the buffer (all ones over a dead link) is never reached: this loop would not end */
+	if (newidx >= console->bufsize)
+		return;
 	while (newidx != console->read_idx) {
 		addr = console->buf_addr + console->read_idx;
 		ch = brcmf_pcie_read_tcm8(devinfo, addr);
@@ -960,8 +1059,17 @@ static void brcmf_pcie_hostready(struct brcmf_pciedev_info *devinfo)
 static irqreturn_t brcmf_pcie_quick_check_isr(int irq, void *arg)
 {
 	struct brcmf_pciedev_info *devinfo = (struct brcmf_pciedev_info *)arg;
+	u32 status;
 
-	if (brcmf_pcie_read_reg32(devinfo, devinfo->reginfo->mailboxint)) {
+	/* the line is shared with the host's own interrupts, its link down among them */
+	if (brcmf_pcie_gone(devinfo))
+		return IRQ_NONE;
+	status = brcmf_pcie_read_reg32(devinfo, devinfo->reginfo->mailboxint);
+	if (status == 0xffffffff) {
+		brcmf_pcie_set_gone(devinfo, "mailbox interrupt status");
+		return IRQ_NONE;
+	}
+	if (status) {
 		brcmf_pcie_intr_disable(devinfo);
 		brcmf_dbg(PCIE, "Enter\n");
 		return IRQ_WAKE_THREAD;
@@ -975,9 +1083,16 @@ static irqreturn_t brcmf_pcie_isr_thread(int irq, void *arg)
 	struct brcmf_pciedev_info *devinfo = (struct brcmf_pciedev_info *)arg;
 	u32 status;
 
+	if (brcmf_pcie_gone(devinfo))
+		return IRQ_HANDLED;
 	devinfo->in_irq = true;
 	status = brcmf_pcie_read_reg32(devinfo, devinfo->reginfo->mailboxint);
 	brcmf_dbg(PCIE, "Enter %x\n", status);
+	if (status == 0xffffffff) {
+		brcmf_pcie_set_gone(devinfo, "mailbox interrupt status");
+		devinfo->in_irq = false;
+		return IRQ_HANDLED;
+	}
 	if (status) {
 		brcmf_pcie_write_reg32(devinfo, devinfo->reginfo->mailboxint,
 				       status);
@@ -1101,16 +1216,40 @@ static int brcmf_pcie_ring_mb_ring_bell(void *ctx)
 }
 
 
+/*
+ * Which ring, what was read and from where: 0xffff from the chip's memory is a link that is gone; anything else, or
+ * an index in host memory (which no dead link can touch), is the chip saying something else.
+ */
+static void brcmf_pcie_bad_index(struct brcmf_pciedev_info *devinfo, struct brcmf_pcie_ringbuf *ring,
+				 const char *which, u16 v)
+{
+	if (brcmf_pcie_gone(devinfo))
+		return;
+	dev_err(&devinfo->pdev->dev, "ring %u: %s index %#x, ring depth %u (indices in %s)\n", ring->id, which, v,
+		ring->commonring.depth, devinfo->dma_idx_sz ? "host memory" : "the chip's memory");
+}
+
 static int brcmf_pcie_ring_mb_update_rptr(void *ctx)
 {
 	struct brcmf_pcie_ringbuf *ring = (struct brcmf_pcie_ringbuf *)ctx;
 	struct brcmf_pciedev_info *devinfo = ring->devinfo;
 	struct brcmf_commonring *commonring = &ring->commonring;
+	u16 r_ptr;
 
 	if (devinfo->state != BRCMFMAC_PCIE_STATE_UP)
 		return -EIO;
 
-	commonring->r_ptr = devinfo->read_ptr(devinfo, ring->r_idx_addr);
+	/*
+	 * Only a ring that is set up can be judged: a TX flowring has depth 0 until its create worker configures it,
+	 * and the TX path asks it for room before that (an index of 0 against a depth of 0 is no dead link).
+	 */
+	r_ptr = devinfo->read_ptr(devinfo, ring->r_idx_addr);
+	if (commonring->depth && r_ptr >= commonring->depth) {
+		brcmf_pcie_bad_index(devinfo, ring, "read", r_ptr);
+		brcmf_pcie_set_gone(devinfo, "ring read index");
+		return -EIO;
+	}
+	commonring->r_ptr = r_ptr;
 
 	brcmf_dbg(PCIE, "R r_ptr %d (%d), ring %d\n", commonring->r_ptr,
 		  commonring->w_ptr, ring->id);
@@ -1124,11 +1263,19 @@ static int brcmf_pcie_ring_mb_update_wptr(void *ctx)
 	struct brcmf_pcie_ringbuf *ring = (struct brcmf_pcie_ringbuf *)ctx;
 	struct brcmf_pciedev_info *devinfo = ring->devinfo;
 	struct brcmf_commonring *commonring = &ring->commonring;
+	u16 w_ptr;
 
 	if (devinfo->state != BRCMFMAC_PCIE_STATE_UP)
 		return -EIO;
 
-	commonring->w_ptr = devinfo->read_ptr(devinfo, ring->w_idx_addr);
+	/* 0xffff over a dead link: n_items far past the ring's end (the 11-23 oops) */
+	w_ptr = devinfo->read_ptr(devinfo, ring->w_idx_addr);
+	if (commonring->depth && w_ptr >= commonring->depth) {
+		brcmf_pcie_bad_index(devinfo, ring, "write", w_ptr);
+		brcmf_pcie_set_gone(devinfo, "ring write index");
+		return -EIO;
+	}
+	commonring->w_ptr = w_ptr;
 
 	brcmf_dbg(PCIE, "R w_ptr %d (%d), ring %d\n", commonring->w_ptr,
 		  commonring->r_ptr, ring->id);
@@ -1625,6 +1772,7 @@ static const struct brcmf_bus_ops brcmf_pcie_bus_ops = {
 	.get_blob = brcmf_pcie_get_blob,
 	.reset = brcmf_pcie_reset,
 	.debugfs_create = brcmf_pcie_debugfs_create,
+	.mbdata = brcmf_pcie_mbdata,
 };
 
 
@@ -1683,6 +1831,16 @@ brcmf_pcie_init_share_ram_info(struct brcmf_pciedev_info *devinfo,
 			host_cap |= BRCMF_HOST_CAP_HOSTRDY;
 		addr = sharedram_addr + BRCMF_SHARED_HOST_CAP_OFFSET;
 		brcmf_pcie_write_tcm32(devinfo, addr, host_cap);
+
+		/*
+		 * As in Broadcom's own dhd: from version 6 the dongle reads
+		 * mailbox data from the control submit ring and answers in
+		 * the control completion ring, unless it sets USE_MAILBOX.
+		 * Written to the TCM mailbox, D3_INFORM was never answered
+		 * (BCM4375) and every suspend failed with -EIO.
+		 */
+		devinfo->mbdata_in_ring =
+			!(shared->flags & BRCMF_PCIE_SHARED_USE_MAILBOX);
 	}
 
 	/* check firmware support dma indicies */
@@ -2511,6 +2669,94 @@ static const struct brcmf_pcie_drvdata drvdata[] = {
 /* Forward declaration for pci_match_id() call */
 static const struct pci_device_id brcmf_pcie_devid_table[];
 
+static irqreturn_t brcmf_pcie_host_wake_isr(int irq, void *arg)
+{
+	struct brcmf_pciedev_info *devinfo = arg;
+
+	/* the line stays high until the dongle is back in D0 */
+	if (atomic_xchg(&devinfo->wake_armed, 0))
+		disable_irq_nosync(irq);
+	pm_wakeup_dev_event(&devinfo->pdev->dev, 500, true);
+	return IRQ_HANDLED;
+}
+
+static void brcmf_pcie_host_wake_free(struct brcmf_pciedev_info *devinfo)
+{
+	struct device *dev = &devinfo->pdev->dev;
+
+	if (devinfo->wake_irq > 0) {
+		disable_irq_wake(devinfo->wake_irq);
+		free_irq(devinfo->wake_irq, devinfo);
+		device_wakeup_disable(dev);
+		devinfo->wake_irq = 0;
+	}
+	if (!IS_ERR_OR_NULL(devinfo->wake_gpio))
+		gpiod_put(devinfo->wake_gpio);
+	devinfo->wake_gpio = NULL;
+	if (devinfo->wake_lookup) {
+		gpiod_remove_lookup_table(devinfo->wake_lookup);
+		kfree(devinfo->wake_lookup->table[0].key);
+		kfree(devinfo->wake_lookup);
+		devinfo->wake_lookup = NULL;
+	}
+}
+
+static void brcmf_pcie_host_wake_setup(struct brcmf_pciedev_info *devinfo,
+				       struct brcmf_bus *bus)
+{
+	struct device *dev = &devinfo->pdev->dev;
+	const char *spec = brcmf_pcie_host_wake, *sep;
+	struct gpiod_lookup_table *t;
+	unsigned int line;
+	char *chip;
+	int ret;
+
+	if (!spec || !*spec)
+		return;
+	sep = strrchr(spec, ':');
+	if (!sep || sep == spec || kstrtouint(sep + 1, 0, &line)) {
+		brcmf_err(bus, "host_wake=%s: expected <gpiochip label>:<line>\n", spec);
+		return;
+	}
+	chip = kstrndup(spec, sep - spec, GFP_KERNEL);
+	t = kzalloc(struct_size(t, table, 2), GFP_KERNEL);
+	if (!chip || !t) {
+		kfree(chip);
+		kfree(t);
+		return;
+	}
+	t->dev_id = dev_name(dev);
+	t->table[0] = (struct gpiod_lookup)GPIO_LOOKUP(chip, line, "host-wake",
+						       GPIO_ACTIVE_HIGH);
+	gpiod_add_lookup_table(t);
+	devinfo->wake_lookup = t;
+
+	devinfo->wake_gpio = gpiod_get(dev, "host-wake", GPIOD_IN);
+	if (IS_ERR(devinfo->wake_gpio)) {
+		ret = PTR_ERR(devinfo->wake_gpio);
+		goto fail;
+	}
+	ret = gpiod_to_irq(devinfo->wake_gpio);
+	if (ret < 0)
+		goto fail;
+	/* armed only from D3 entry to D0: in D0 the dongle uses INTx */
+	ret = request_irq(ret, brcmf_pcie_host_wake_isr,
+			  IRQF_TRIGGER_HIGH | IRQF_NO_AUTOEN, "brcmf_host_wake",
+			  devinfo);
+	if (ret)
+		goto fail;
+	devinfo->wake_irq = gpiod_to_irq(devinfo->wake_gpio);
+	device_wakeup_enable(dev);
+	enable_irq_wake(devinfo->wake_irq);
+	bus->host_wake = true;
+	dev_info(dev, "host wake on %s (IRQ %d)\n", spec, devinfo->wake_irq);
+	return;
+
+fail:
+	brcmf_err(bus, "host_wake=%s: %d, the link drops in suspend\n", spec, ret);
+	brcmf_pcie_host_wake_free(devinfo);
+}
+
 static int
 brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
@@ -2591,6 +2837,7 @@ brcmf_pcie_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	bus->proto_type = BRCMF_PROTO_MSGBUF;
 	bus->chip = devinfo->coreid;
 	bus->wowl_supported = pci_pme_capable(pdev, PCI_D3hot);
+	brcmf_pcie_host_wake_setup(devinfo, bus);
 	bus->fwvid = drvdata[id->driver_data].vendor;
 	devinfo->fwseed = drvdata[id->driver_data].fw_seed;
 	dev_set_drvdata(&pdev->dev, bus);
@@ -2639,6 +2886,7 @@ fail_bus:
 	kfree(bus);
 fail:
 	brcmf_err(NULL, "failed %x:%x\n", pdev->vendor, pdev->device);
+	brcmf_pcie_host_wake_free(devinfo);
 	brcmf_pcie_release_resource(devinfo);
 	if (devinfo->ci)
 		brcmf_chip_detach(devinfo->ci);
@@ -2673,7 +2921,9 @@ brcmf_pcie_remove(struct pci_dev *pdev)
 	/* Stop notifications and DMA before detaching protocol buffers. */
 	brcmf_bus_change_state(bus, BRCMF_BUS_DOWN);
 	brcmf_pcie_release_irq(devinfo);
-	brcmf_pcie_reset_device(devinfo);
+	brcmf_pcie_host_wake_free(devinfo);
+	if (!brcmf_pcie_gone(devinfo))
+		brcmf_pcie_reset_device(devinfo);
 	pci_clear_master(pdev);
 
 	brcmf_detach(&pdev->dev);
@@ -2716,18 +2966,30 @@ static int brcmf_pcie_pm_enter_D3(struct device *dev)
 	brcmf_pcie_fwcon_timer(devinfo, false);
 	brcmf_bus_change_state(bus, BRCMF_BUS_DOWN);
 
+	/* nothing to put to sleep; its removal is on the way (a refused D3 would only fail the system sleep) */
+	if (brcmf_pcie_gone(devinfo))
+		return 0;
+
 	devinfo->mbdata_completed = false;
 	brcmf_pcie_send_mb_data(devinfo, BRCMF_H2D_HOST_D3_INFORM);
 
 	wait_event_timeout(devinfo->mbdata_resp_wait, devinfo->mbdata_completed,
 			   BRCMF_PCIE_MBDATA_TIMEOUT);
 	if (!devinfo->mbdata_completed) {
+		/* the link went while it waited: the bus stays down */
+		if (brcmf_pcie_gone(devinfo))
+			return 0;
 		brcmf_err(bus, "Timeout on response for entering D3 substate\n");
 		brcmf_bus_change_state(bus, BRCMF_BUS_UP);
 		return -EIO;
 	}
 
 	devinfo->state = BRCMFMAC_PCIE_STATE_DOWN;
+
+	/* still associated (wowlan): from here on the dongle wakes us */
+	if (devinfo->wake_irq > 0 && devinfo->wowl_enabled &&
+	    !atomic_xchg(&devinfo->wake_armed, 1))
+		enable_irq(devinfo->wake_irq);
 
 	return 0;
 }
@@ -2746,13 +3008,20 @@ static int brcmf_pcie_pm_leave_D3(struct device *dev)
 	devinfo = bus->bus_priv.pcie->devinfo;
 	brcmf_dbg(PCIE, "Enter, dev=%p, bus=%p\n", dev, bus);
 
+	if (devinfo->wake_irq > 0 && atomic_xchg(&devinfo->wake_armed, 0))
+		disable_irq(devinfo->wake_irq);
+
+	if (brcmf_pcie_gone(devinfo))
+		return 0;
+
 	/* Check if device is still up and running, if so we are ready */
 	if (brcmf_pcie_read_reg32(devinfo, devinfo->reginfo->intmask) != 0) {
 		brcmf_dbg(PCIE, "Try to wakeup device....\n");
+		/* a ring's doorbell only rings while the bus is up */
+		devinfo->state = BRCMFMAC_PCIE_STATE_UP;
 		if (brcmf_pcie_send_mb_data(devinfo, BRCMF_H2D_HOST_D0_INFORM))
 			goto cleanup;
 		brcmf_dbg(PCIE, "Hot resume, continue....\n");
-		devinfo->state = BRCMFMAC_PCIE_STATE_UP;
 		brcmf_pcie_select_core(devinfo, BCMA_CORE_PCIE2);
 		brcmf_bus_change_state(bus, BRCMF_BUS_UP);
 		brcmf_pcie_intr_enable(devinfo);
