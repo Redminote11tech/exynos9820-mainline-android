@@ -14,7 +14,7 @@ Booting an unmodified Android 16 custom ROM (Project Infinity X) on the Samsung 
 - **GPU (OpenGL ES 3.1 + Vulkan):**
   - Non-coherent Exynos 9820 Mali-G76 Panfrost kernel support (AArch64 stage-1 page tables + `GPU_COHERENCY_ENABLE` non-coherent programming after reset, 0 GPU faults)
   - Full vendor Mali-G76 DVFS scaling (`156 MHz` to `702 MHz`) via ACPM IPC
-  - Mesa 26.0.8 Panfrost OpenGL ES 3.1 + **PanVK Vulkan** (`vulkan.mali.so`) + `drm_hwcomposer` (HWC3) + `minigbm`
+  - Mesa 26.3.1 Panfrost OpenGL ES 3.1 + **PanVK Vulkan 1.3** (`vulkan.mali.so`) + `drm_hwcomposer` (HWC3) + `minigbm`
 - **Power Management (S2idle):** `WFI-s2idle` cpuidle state (`cpuidle-psci`), `genpd` runtime-suspend resume guard, and `madera` system sleep PM ops for clean suspend-to-idle
 - **Wi-Fi 6 (802.11ax):** Broadcom BCM4375 (`14e4:4475`) over Exynos 9820 PCIe Gen1 x1 + DWC MSI + `brcmfmac` (rev7 IPC `host_cap` negotiation, `ringupd` skip, D2H XOR sync, DMA barriers, 128-byte random seed)
 - **CPU & RAM:** All 8 CPU cores online (4x Cortex-A55 @ 1.95 GHz, 2x Cortex-A75 @ 2.31 GHz, 2x Exynos M4 @ 2.53 GHz) and full 8 GB RAM (`7.4 GB` usable) with Samsung `debug_snapshot` and `ect` memory carveouts properly reserved
@@ -26,7 +26,7 @@ Booting an unmodified Android 16 custom ROM (Project Infinity X) on the Samsung 
 |---|---|---|
 | Boot / Encrypted `/data` | Working | `tzdev` + `dm-default-key` + `fscrypt` + `scsi_srpmb` |
 | Display (`exynos9820-decon-kms`) | Working | Zero-copy 1440x3040 60 Hz hardware TE VSYNC |
-| GPU (Panfrost GLES 3.1 + PanVK) | Working | Mesa 26.0.8, 156 to 702 MHz DVFS, 0 GPU faults |
+| GPU (Panfrost GLES 3.1 + PanVK 1.3) | Working | Mesa 26.3.1, 156 to 702 MHz DVFS, 0 GPU faults |
 | Wi-Fi 6 (`BCM4375` / `brcmfmac`) | Working | 5 GHz 802.11ax, DHCP, NTP clock sync |
 | Touchscreen (`s6sy761`) | Working | Smooth multitouch, reliable boot probe |
 | All 8 CPU Cores + 8 GB RAM | Working | Exynos M4 cores active, reserved memory fixed |
@@ -45,7 +45,7 @@ Booting an unmodified Android 16 custom ROM (Project Infinity X) on the Samsung 
 Stock Samsung Android 16 ROMs ship with proprietary Mali Bifrost (`libGLES_mali.so`), Exynos HWC, and vendor kernel expectations. Instead of rebuilding the entire ROM, this port:
 
 1. Boots mainline Linux 7.2-rc2 from `/dev/block/by-name/boot` via `uniLoader`.
-2. Mounts a small RAM `overlayfs` over `/vendor` from `/cache/mainline-gpu` containing open-source Mesa 26.0.8 (Panfrost GLES + PanVK Vulkan), `drm_hwcomposer` (HWC3), `minigbm` gralloc, custom Primary Audio HAL, and Broadcom `brcmfmac` firmware symlinks.
+2. Mounts a small RAM `overlayfs` over `/vendor` from `/cache/mainline-gpu` containing open-source Mesa 26.3.1 (Panfrost GLES + PanVK Vulkan 1.3), `drm_hwcomposer` (HWC3), `minigbm` gralloc, custom Primary Audio & Vibrator HALs, and Broadcom `brcmfmac` firmware symlinks.
 3. Keeps `/system`, `/vendor`, and `/data` intact so you can switch back to a stock/LineageOS boot image at any time.
 
 ## Repository Layout
