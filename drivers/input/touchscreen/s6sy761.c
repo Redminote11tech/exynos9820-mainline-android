@@ -348,7 +348,17 @@ static int s6sy761_power_on(struct s6sy761_data *sdata)
 	if ((event != S6SY761_EVENT_INFO &&
 	     event != S6SY761_EVENT_VENDOR_INFO) ||
 	    buffer[1] != S6SY761_INFO_BOOT_COMPLETE) {
-		return -ENODEV;
+		/*
+		 * On warm reboots (e.g. from recovery), the touch IC may
+		 * already be booted in application mode with no pending
+		 * BOOT_COMPLETE event. Accept it if BOOT_STATUS says it is
+		 * already running in application mode.
+		 */
+		ret = i2c_smbus_read_byte_data(sdata->client,
+					       S6SY761_BOOT_STATUS);
+		if (ret != S6SY761_BS_APPLICATION)
+			return -ENODEV;
+		i2c_smbus_write_byte(sdata->client, S6SY761_CLEAR_EVENT_STACK);
 	}
 
 	ret = i2c_smbus_read_byte_data(sdata->client, S6SY761_BOOT_STATUS);
@@ -454,9 +464,11 @@ static int s6sy761_probe(struct i2c_client *client)
 		err = s6sy761_hw_init(sdata, &max_x, &max_y);
 		if (!err)
 			break;
-		dev_warn(&client->dev, "hw_init attempt %d failed (%d), retrying\n",
+		dev_warn(&client->dev, "hw_init attempt %d failed (%d), power-cycling\n",
 			 retry + 1, err);
-		msleep(50);
+		regulator_bulk_disable(ARRAY_SIZE(sdata->regulators),
+				       sdata->regulators);
+		msleep(100);
 	}
 	if (err)
 		return err;
