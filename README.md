@@ -4,7 +4,7 @@ Booting an unmodified Android 16 custom ROM (Project Infinity X) on the Samsung 
 
 ## Highlights
 
-- **Kernel:** Mainline Linux 7.2-rc2 (`aarch64`, built with LLVM/Clang) + KernelSU Next, packaged with `uniLoader` into a standard Samsung `boot.img`
+- **Kernel:** Mainline Linux 7.2-rc2 (`aarch64`, built with LLVM/Clang) + **KernelSU Next v3.4.2** (UAPI 5, working manager + root) + `CONFIG_DM_SNAPSHOT=y` (DSU support), packaged with `uniLoader` into a standard Samsung `boot.img`
 - **Android 16 ROM:** Boots the real encrypted `/data` partition (`fscrypt` + `dm-default-key` + TEEGRIS `tzdev` + UFS `scsi_srpmb`) without modifying `/system` or `/vendor` permanently (all Mesa/HWC/firmware overrides live in a read-only RAM `overlayfs` from `/cache/mainline-gpu`)
 - **Display (Zero-Copy 60 Hz KMS + Brightness):** Native `exynos9820-decon-kms` handover driver (`1440x3040 @ 60 Hz`) scanning out directly through `SysMMU_DPUD0` with hardware TE vblank interrupts (`GIC SPI 183`), PSR, hardware R/B channel swap in GF0 IDMA, and S6E3HA9 DSIM0 brightness (`0xB1` AOR) + `DISPLAY_OFF`/`DISPLAY_ON` DPMS
 - **Audio (Stereo Speakers):** Firmware-less Exynos 9820 `ABOX` (`exynos9820-abox`), Cirrus Logic Madera `CS47L93` codec, dual `CS35L40` speaker amplifiers (`S32_LE` TDM slot width fix), `pd_aud` TZPC SMC restore, `CLKOUT0` 26 MHz MCLK, and a minimal open-source Android Primary Audio HAL (`android/audio_hw_exynos9820.c`)
@@ -15,7 +15,9 @@ Booting an unmodified Android 16 custom ROM (Project Infinity X) on the Samsung 
   - Non-coherent Exynos 9820 Mali-G76 Panfrost kernel support (AArch64 stage-1 page tables + `GPU_COHERENCY_ENABLE` non-coherent programming after reset, 0 GPU faults)
   - Full vendor Mali-G76 DVFS scaling (`156 MHz` to `702 MHz`) via ACPM IPC
   - Mesa 26.3.1 Panfrost OpenGL ES 3.1 + **PanVK Vulkan 1.3** (`vulkan.mali.so`) + `drm_hwcomposer` (HWC3) + `minigbm`
-- **Power Management (S2idle):** `WFI-s2idle` cpuidle state (`cpuidle-psci`), `genpd` runtime-suspend resume guard, and `madera` system sleep PM ops for clean suspend-to-idle
+- **Power Management (Full Android S2idle):** `WFI-s2idle` cpuidle state (`cpuidle-psci`), `genpd` runtime-suspend resume guard, `madera` system sleep PM ops, `pinctrl` AUD/NOIRQ fixes, `pci-exynos` s2idle keep-link, `s6sy761` resume `SENSE_ON`, and `brcmfmac` `mbdata_in_ring` + OOB `host_wake` (`gpa0:7`) + `PM_MAX`
+- **Bluetooth (`BCM4375B1`):** Mainline `hci_bcm` over `PERIC1` `usi_uart_bt` (`serial1`, `3 Mbps`) loading Murata B1 `BCM4362A2.hcd` + lightweight open-source `HCI_CHANNEL_USER` `libbt-vendor.so` bridge (`android/bt_vendor_mainline.c`) for Android 16
+- **Sensors (`BCM4775` Sensor Hub):** Mainline `bcm4775-shub` IIO driver over `PERIC1` `spi17` (`USI16`) + standalone open-source Android AIDL v3 `ISensors` HAL (`android/sensors_mainline.cpp`) providing Accelerometer (Auto-Rotate), Ambient Light (Auto-Brightness), Proximity, and Compass Heading
 - **Wi-Fi 6 (802.11ax):** Broadcom BCM4375 (`14e4:4475`) over Exynos 9820 PCIe Gen1 x1 + DWC MSI + `brcmfmac` (rev7 IPC `host_cap` negotiation, `ringupd` skip, D2H XOR sync, DMA barriers, 128-byte random seed)
 - **CPU & RAM:** All 8 CPU cores online (4x Cortex-A55 @ 1.95 GHz, 2x Cortex-A75 @ 2.31 GHz, 2x Exynos M4 @ 2.53 GHz) and full 8 GB RAM (`7.4 GB` usable) with Samsung `debug_snapshot` and `ect` memory carveouts properly reserved
 - **Touch & USB:** Samsung `s6sy761` touchscreen (batched `input_sync()` + reliable I2C probe retry) and `max77705` MUIC auto-USB switching (automatic ADB without cable replug)
@@ -37,8 +39,11 @@ Booting an unmodified Android 16 custom ROM (Project Infinity X) on the Samsung 
 | Ultrasonic Fingerprint (`qbt2000`) | Working | Full enrollment & unlock via TEEgris + `s6sy761` FOD bridge |
 | Vibrator / Haptics (`max77693-haptic`) | Working | Custom AIDL v2 `IVibrator` HAL (`EV_FF` / `FF_RUMBLE`) |
 | Power & Thermal HALs | Working | Mainline CPU/Panfrost `powerhint.json` + 6 live thermal zones |
-| S2idle Sleep (`WFI-s2idle`) | Working | `cpuidle-psci` WFI-s2idle + `genpd` + `madera` PM |
-| Bluetooth, Camera, Sensors, RIL, S2R | TODO | Planned next milestones |
+| S2idle Sleep (`WFI-s2idle` + Wi-Fi `host_wake`) | Working | Full Android suspend/resume with Wi-Fi `PM_MAX`, `gpa0:7` wake, and touch resume |
+| Bluetooth (`BCM4375B1`) | Working | `hci_bcm` `3 Mbps` + custom `HCI_CHANNEL_USER` `libbt-vendor.so` bridge |
+| Sensors (`BCM4775` IIO Hub) | Working | Accelerometer (Auto-Rotate), Light, Proximity, Compass via custom AIDL v3 `ISensors` HAL |
+| KernelSU Next (`v3.4.2`) + DSU | Working | UAPI 5 + `__sys_setresuid` hook + `CONFIG_DM_SNAPSHOT=y` |
+| Camera, RIL, S2R | TODO | Planned next milestones |
 
 ## How It Works (Why `/system` and `/vendor` Stay Untouched)
 
