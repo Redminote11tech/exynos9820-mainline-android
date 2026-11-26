@@ -104,6 +104,12 @@ enum s6sy761_regulators {
 	S6SY761_REGULATOR_AVDD,
 };
 
+#ifdef CONFIG_SENSORS_QBT2000
+extern void qbt2000_fod_event(bool down);
+#else
+static inline void qbt2000_fod_event(bool down) {}
+#endif
+
 struct s6sy761_data {
 	struct i2c_client *client;
 	struct regulator_bulk_data regulators[2];
@@ -114,6 +120,10 @@ struct s6sy761_data {
 
 	u16 devid;
 	u8 tx_channel;
+	unsigned int max_x;
+	unsigned int max_y;
+	bool fod_down;
+	u8 fod_tid;
 };
 
 /*
@@ -162,6 +172,21 @@ static void s6sy761_report_coordinates(struct s6sy761_data *sdata,
 	input_report_abs(sdata->input, ABS_MT_TOUCH_MAJOR, major);
 	input_report_abs(sdata->input, ABS_MT_TOUCH_MINOR, minor);
 	input_report_abs(sdata->input, ABS_MT_PRESSURE, z);
+
+	if (sdata->max_x && sdata->max_y) {
+		bool in_fod = (x >= sdata->max_x * 28 / 100 &&
+			       x <= sdata->max_x * 72 / 100 &&
+			       y >= sdata->max_y * 74 / 100 &&
+			       y <= sdata->max_y * 94 / 100);
+		if (in_fod && !sdata->fod_down) {
+			sdata->fod_down = true;
+			sdata->fod_tid = tid;
+			qbt2000_fod_event(true);
+		} else if (!in_fod && sdata->fod_down && sdata->fod_tid == tid) {
+			sdata->fod_down = false;
+			qbt2000_fod_event(false);
+		}
+	}
 }
 
 static void s6sy761_report_release(struct s6sy761_data *sdata,
@@ -169,6 +194,11 @@ static void s6sy761_report_release(struct s6sy761_data *sdata,
 {
 	input_mt_slot(sdata->input, tid);
 	input_mt_report_slot_state(sdata->input, MT_TOOL_FINGER, false);
+
+	if (sdata->fod_down && sdata->fod_tid == tid) {
+		sdata->fod_down = false;
+		qbt2000_fod_event(false);
+	}
 }
 
 static void s6sy761_handle_coordinates(struct s6sy761_data *sdata, u8 *event)
@@ -482,6 +512,8 @@ static int s6sy761_probe(struct i2c_client *client)
 	sdata->input->open = s6sy761_input_open;
 	sdata->input->close = s6sy761_input_close;
 
+	sdata->max_x = max_x;
+	sdata->max_y = max_y;
 	input_set_abs_params(sdata->input, ABS_MT_POSITION_X, 0, max_x, 0, 0);
 	input_set_abs_params(sdata->input, ABS_MT_POSITION_Y, 0, max_y, 0, 0);
 	input_set_abs_params(sdata->input, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);

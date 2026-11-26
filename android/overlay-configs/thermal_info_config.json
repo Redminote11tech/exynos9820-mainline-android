@@ -3,43 +3,49 @@
         {
             "Name": "cpucl2-thermal",
             "Type": "CPU",
-            "HotThreshold": ["NAN", "NAN", "NAN", 96.0, "NAN", "NAN", 115.0],
-            "VrThreshold": "NAN",
+            "HotThreshold": [55.0, 65.0, 75.0, 85.0, 95.0, 105.0, 115.0],
+            "HotHysteresis": [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
+            "VrThreshold": 85.0,
             "Multiplier": 0.001
         },
         {
             "Name": "cpucl1-thermal",
             "Type": "CPU",
-            "HotThreshold": ["NAN", "NAN", "NAN", 96.0, "NAN", "NAN", 115.0],
-            "VrThreshold": "NAN",
+            "HotThreshold": [55.0, 65.0, 75.0, 85.0, 95.0, 105.0, 115.0],
+            "HotHysteresis": [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
+            "VrThreshold": 85.0,
             "Multiplier": 0.001
         },
         {
             "Name": "cpucl0-thermal",
             "Type": "CPU",
-            "HotThreshold": ["NAN", "NAN", "NAN", 96.0, "NAN", "NAN", 115.0],
-            "VrThreshold": "NAN",
+            "HotThreshold": [55.0, 65.0, 75.0, 85.0, 95.0, 105.0, 115.0],
+            "HotHysteresis": [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
+            "VrThreshold": 85.0,
             "Multiplier": 0.001
         },
         {
             "Name": "g3d-thermal",
             "Type": "GPU",
-            "HotThreshold": ["NAN", "NAN", "NAN", 96.0, "NAN", "NAN", 115.0],
-            "VrThreshold": "NAN",
+            "HotThreshold": [55.0, 65.0, 75.0, 85.0, 95.0, 105.0, 115.0],
+            "HotHysteresis": [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
+            "VrThreshold": 85.0,
             "Multiplier": 0.001
         },
         {
             "Name": "isp-thermal",
             "Type": "NPU",
-            "HotThreshold": ["NAN", "NAN", "NAN", 96.0, "NAN", "NAN", 115.0],
-            "VrThreshold": "NAN",
+            "HotThreshold": [55.0, 65.0, 75.0, 85.0, 95.0, 105.0, 115.0],
+            "HotHysteresis": [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
+            "VrThreshold": 85.0,
             "Multiplier": 0.001
         },
         {
             "Name": "max170xx_battery",
             "Type": "BATTERY",
-            "HotThreshold": ["NAN", "NAN", "NAN", 50.0, "NAN", "NAN", 60.0],
-            "VrThreshold": "NAN",
+            "HotThreshold": [37.0, 40.0, 43.0, 46.0, 50.0, 55.0, 60.0],
+            "HotHysteresis": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            "VrThreshold": 46.0,
             "Multiplier": 0.001
         }
     ]

@@ -9,6 +9,8 @@ Booting an unmodified Android 16 custom ROM (Project Infinity X) on the Samsung 
 - **Display (Zero-Copy 60 Hz KMS + Brightness):** Native `exynos9820-decon-kms` handover driver (`1440x3040 @ 60 Hz`) scanning out directly through `SysMMU_DPUD0` with hardware TE vblank interrupts (`GIC SPI 183`), PSR, hardware R/B channel swap in GF0 IDMA, and S6E3HA9 DSIM0 brightness (`0xB1` AOR) + `DISPLAY_OFF`/`DISPLAY_ON` DPMS
 - **Audio (Stereo Speakers):** Firmware-less Exynos 9820 `ABOX` (`exynos9820-abox`), Cirrus Logic Madera `CS47L93` codec, dual `CS35L40` speaker amplifiers (`S32_LE` TDM slot width fix), `pd_aud` TZPC SMC restore, `CLKOUT0` 26 MHz MCLK, and a minimal open-source Android Primary Audio HAL (`android/audio_hw_exynos9820.c`)
 - **Hardware Video Codec (MFC v13):** Mainline `s5p-mfc` v13 (`188d0000.video-codec`) with `CMU_MFC` runtime PM, dual `sysmmu_mfc0`/`sysmmu_mfc1` IOMMUs, and `pd_mfc` TZPC SMC restore, exposing `/dev/video0` (`s5p-mfc-dec`) and `/dev/video1` (`s5p-mfc-enc`) using stock `/vendor/firmware/mfc_fw.bin`
+- **Ultrasonic In-Display Fingerprint (`qbt2000`):** Qualcomm QBT2000 driver ported to Linux 7.2 (`drivers/fingerprint/`) with Secure-World `SPI1` (`PERIC0 USI00`) clocks, TEEgris (`tzdev`) trustlet integration, and `s6sy761` touchscreen FOD trigger bridge (full enrollment and unlock working)
+- **Haptics, Power & Thermal:** Custom open-source AIDL v2 Vibrator HAL (`android/vibrator_mainline.c`) driving `max77693-haptic` (`EV_FF` / `FF_RUMBLE`), plus mainline `powerhint.json` (CPU + Panfrost devfreq boost) and `thermal_info_config.json` (6 live thermal zones)
 - **GPU (OpenGL ES 3.1 + Vulkan):**
   - Non-coherent Exynos 9820 Mali-G76 Panfrost kernel support (AArch64 stage-1 page tables + `GPU_COHERENCY_ENABLE` non-coherent programming after reset, 0 GPU faults)
   - Full vendor Mali-G76 DVFS scaling (`156 MHz` to `702 MHz`) via ACPM IPC
@@ -32,8 +34,11 @@ Booting an unmodified Android 16 custom ROM (Project Infinity X) on the Samsung 
 | Display Brightness & Screen Off (S6E3HA9) | Working | DSIM0 `0xB1` AOR dimming + `0x28`/`0x29` DPMS |
 | Stereo Speaker Audio (`ABOX` + `CS35L40`) | Working | `hw:0,1` 48 kHz stereo `S32_LE` + custom Android Audio HAL |
 | Hardware Video Codec (`s5p-mfc` v13) | Kernel Working | `/dev/video0` & `/dev/video1` live with `mfc_fw.bin`; V4L2 Codec2 HAL TODO for Android apps |
+| Ultrasonic Fingerprint (`qbt2000`) | Working | Full enrollment & unlock via TEEgris + `s6sy761` FOD bridge |
+| Vibrator / Haptics (`max77693-haptic`) | Working | Custom AIDL v2 `IVibrator` HAL (`EV_FF` / `FF_RUMBLE`) |
+| Power & Thermal HALs | Working | Mainline CPU/Panfrost `powerhint.json` + 6 live thermal zones |
 | S2idle Sleep (`WFI-s2idle`) | Working | `cpuidle-psci` WFI-s2idle + `genpd` + `madera` PM |
-| Bluetooth, Camera, RIL, S2R | TODO | Planned next milestones |
+| Bluetooth, Camera, Sensors, RIL, S2R | TODO | Planned next milestones |
 
 ## How It Works (Why `/system` and `/vendor` Stay Untouched)
 

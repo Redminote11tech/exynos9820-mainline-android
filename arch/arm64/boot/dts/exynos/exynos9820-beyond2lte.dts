@@ -279,7 +279,79 @@
 	};
 };
 
+&pinctrl_alive {
+	btp_ipc: btp-ipc-pins {
+		samsung,pins = "gpa1-3";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
+		samsung,pin-drv = <3>;
+	};
+
+	btp_wuhb: btp-wuhb-pins {
+		samsung,pins = "gpa1-1";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
+		samsung,pin-drv = <3>;
+	};
+};
+
+&pinctrl_peric0 {
+	spi1_bus: spi1-bus-pins {
+		samsung,pins = "gpp0-2", "gpp0-1", "gpp0-0";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_2>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
+		samsung,pin-drv = <3>;
+	};
+
+	spi1_cs_func_high: spi1-cs-func-high-pins {
+		samsung,pins = "gpp0-3";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_2>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-drv = <3>;
+		samsung,pin-val = <1>;
+	};
+
+	spi1_bus_sleep: spi1-bus-sleep-pins {
+		samsung,pins = "gpp0-2", "gpp0-1", "gpp0-0";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_INPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
+		samsung,pin-drv = <3>;
+	};
+
+	spi1_cs: spi1-cs-pins {
+		samsung,pins = "gpp0-3";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-drv = <0>;
+	};
+};
+
+&pinctrl_peric1 {
+	btp_ldo: btp-ldo-pins {
+		samsung,pins = "gph1-0";
+		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
+		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-drv = <3>;
+	};
+};
+
 / {
+	qbt2000 {
+		compatible = "qcom,qbt2000";
+		qcom,ipc-gpios = <&gpa1 3 GPIO_ACTIVE_HIGH>;
+		qcom,wuhb-gpios = <&gpa1 1 GPIO_ACTIVE_HIGH>;
+		qcom,ldo-gpios = <&gph1 0 GPIO_ACTIVE_HIGH>;
+		qcom,position = "13.83,0.00,9.00,4.00,14.80,14.80,13.00,13.00,5.00";
+		qcom,modelinfo = "G97X";
+		clock-names = "fp-spi-pclk", "fp-spi-sclk";
+		clocks = <&cmu_peric0 CLK_GOUT_PERIC0_USI00_USI_PCLK>,
+			 <&cmu_peric0 CLK_GOUT_PERIC0_USI00_USI_IPCLK>;
+		pinctrl-names = "default", "pins_poweron", "pins_poweroff";
+		pinctrl-0 = <&btp_ipc &btp_wuhb &btp_ldo>;
+		pinctrl-1 = <&spi1_bus &spi1_cs_func_high>;
+		pinctrl-2 = <&spi1_bus_sleep &spi1_cs>;
+	};
+
 	sound {
 		compatible = "samsung,beyond0lte-madera";
 		pinctrl-names = "default";
