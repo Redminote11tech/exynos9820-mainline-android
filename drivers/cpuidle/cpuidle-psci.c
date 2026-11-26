@@ -347,6 +347,36 @@ static void psci_cpu_deinit_idle(int cpu)
 	psci_cpuidle_use_syscore = false;
 }
 
+static int psci_enter_wfi(struct cpuidle_device *dev,
+			  struct cpuidle_driver *drv, int idx)
+{
+	cpu_do_idle();
+	return idx;
+}
+
+/*
+ * Upstream registers nothing without DT idle states, as the architectural
+ * back-end runs WFI anyway. But suspend-to-idle freezes the tick and
+ * suspends timekeeping only in a cpuidle state above index 0 that has
+ * ->enter_s2idle; without one CLOCK_MONOTONIC runs on through s2idle and
+ * every kernel timer still wakes the CPUs. Register WFI a second time for
+ * s2idle.
+ */
+static int psci_idle_init_wfi_only(struct cpuidle_driver *drv)
+{
+	struct cpuidle_state *s = &drv->states[1];
+
+	drv->states[0].enter = psci_enter_wfi;
+	*s = drv->states[0];
+	s->enter_s2idle = psci_enter_wfi;
+	s->target_residency = USEC_PER_MSEC;
+	strscpy(s->name, "WFI-s2idle");
+	strscpy(s->desc, "ARM WFI, for suspend-to-idle");
+	drv->state_count = 2;
+
+	return cpuidle_register(drv, NULL);
+}
+
 static int psci_idle_init_cpu(struct device *dev, int cpu)
 {
 	struct cpuidle_driver *drv;
@@ -389,16 +419,11 @@ static int psci_idle_init_cpu(struct device *dev, int cpu)
 	strscpy(drv->states[0].name, "WFI");
 	strscpy(drv->states[0].desc, "ARM WFI");
 
-	/*
-	 * If no DT idle states are detected (ret == 0) let the driver
-	 * initialization fail accordingly since there is no reason to
-	 * initialize the idle driver if only wfi is supported, the
-	 * default archictectural back-end already executes wfi
-	 * on idle entry.
-	 */
 	ret = dt_init_idle_driver(drv, psci_idle_state_match, 1);
-	if (ret <= 0)
-		return ret ? : -ENODEV;
+	if (ret < 0)
+		return ret;
+	if (!ret)
+		return psci_idle_init_wfi_only(drv);
 
 	/*
 	 * Initialize PSCI idle states.
@@ -477,9 +502,6 @@ static bool __init dt_idle_state_present(void)
 static int __init psci_idle_init(void)
 {
 	struct faux_device *fdev;
-
-	if (!dt_idle_state_present())
-		return 0;
 
 	fdev = faux_device_create("psci-cpuidle", NULL, &psci_cpuidle_ops);
 	if (!fdev) {

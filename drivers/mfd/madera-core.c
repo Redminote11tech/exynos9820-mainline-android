@@ -368,6 +368,8 @@ const struct dev_pm_ops madera_pm_ops = {
 	SET_RUNTIME_PM_OPS(madera_runtime_suspend,
 			   madera_runtime_resume,
 			   NULL)
+	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
+				pm_runtime_force_resume)
 };
 EXPORT_SYMBOL_GPL(madera_pm_ops);
 
