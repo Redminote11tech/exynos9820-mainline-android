@@ -10,13 +10,17 @@
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
+#include <linux/mutex.h>
 #include <linux/uidgid.h>
 
+#include "ksu.h"
 #include "policy/allowlist.h"
 #include "hook/setuid_hook.h"
 #include "klog.h" // IWYU pragma: keep
 #include "manager/manager_identity.h"
 #include "infra/seccomp_cache.h"
+#include "runtime/ksud_boot.h"
+#include "selinux/selinux.h"
 #include "supercall/supercall.h"
 #include "hook/tp_marker.h"
 #include "feature/kernel_umount.h"
@@ -25,7 +29,22 @@ int ksu_handle_setresuid(uid_t old_uid, uid_t new_uid)
 {
     // we rely on the fact that zygote always call setresuid(3) with same uids
 
-    pr_info("handle_setresuid from %d to %d\n", old_uid, new_uid);
+    pr_debug("handle_setresuid from %d to %d\n", old_uid, new_uid);
+
+    if (unlikely(old_uid == 0 && new_uid >= 10000 && !ksu_is_manager_appid_valid())) {
+        static DEFINE_MUTEX(late_init_lock);
+        static bool late_init_done = false;
+        mutex_lock(&late_init_lock);
+        if (!late_init_done && !ksu_is_manager_appid_valid()) {
+            pr_info("ksu setresuid: lazy post-fs-data init\n");
+            apply_kernelsu_rules();
+            cache_sid();
+            setup_ksu_cred();
+            on_post_fs_data();
+            late_init_done = true;
+        }
+        mutex_unlock(&late_init_lock);
+    }
 
     if (unlikely(is_uid_manager(new_uid))) {
         spin_lock_irq(&current->sighand->siglock);

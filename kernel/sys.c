@@ -773,7 +773,20 @@ long __sys_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 		goto error;
 
 	flag_nproc_exceeded(new);
+#ifdef CONFIG_KSU
+	{
+		extern int ksu_handle_setresuid(uid_t old_uid, uid_t new_uid);
+		uid_t old_uid = from_kuid_munged(old->user_ns, old->uid);
+		uid_t new_uid = from_kuid_munged(new->user_ns, new->uid);
+
+		retval = commit_creds(new);
+		if (!retval)
+			ksu_handle_setresuid(old_uid, new_uid);
+		return retval;
+	}
+#else
 	return commit_creds(new);
+#endif
 
 error:
 	abort_creds(new);
