@@ -111,20 +111,6 @@ static int max77705_i2c_probe(struct i2c_client *i2c)
 	/* Active Discharge Enable */
 	regmap_update_bits(max77705->regmap, MAX77705_PMIC_REG_MAINCTRL1, 1, 1);
 
-	/* Route MAX77705 MUIC/USBC D+/D- switch to AP USB (COM_USB = 0x09) via
-	 * opcode COMMAND_CONTROL1_WRITE (0x06) on MUIC I2C addr 0x25 so warm
-	 * reboots from recovery auto-enumerate USB/ADB without physical replug. */
-	{
-		struct i2c_client *muic = i2c_new_dummy_device(i2c->adapter, 0x25);
-		if (!IS_ERR(muic)) {
-			u8 cmd[2] = { 0x06, 0x09 }; /* COMMAND_CONTROL1_WRITE, COM_USB */
-			int r1 = i2c_smbus_write_i2c_block_data(muic, 0x21, sizeof(cmd), cmd);
-			int r2 = i2c_smbus_write_byte_data(muic, 0x41, 0x00);
-			dev_info(dev, "max77705: routed MUIC D+/D- to AP USB (r1=%d r2=%d)\n", r1, r2);
-			i2c_unregister_device(muic);
-		}
-	}
-
 	ret = devm_regmap_add_irq_chip(dev, max77705->regmap,
 					i2c->irq,
 					IRQF_ONESHOT, 0,

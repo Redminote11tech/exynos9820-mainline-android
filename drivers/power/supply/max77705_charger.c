@@ -17,6 +17,7 @@
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
+#include <linux/regulator/driver.h>
 
 static const char *max77705_charger_model		= "max77705";
 static const char *max77705_charger_manufacturer	= "Maxim Integrated";
@@ -40,35 +41,19 @@ static enum power_supply_property max77705_charger_props[] = {
 	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
 };
 
+/*
+ * The charger regulates its input voltage in hardware (VCHGIN_REG); this
+ * only reports it. Stepping CHGIN_LIM down from here fights the CCIC,
+ * which sets the input current itself under a PD contract (AUTOIBUS):
+ * AICL_OK then stays clear and the limit was walked to its floor while
+ * the input current was unchanged. With the OTG boost running, AICL is
+ * the boost's own VBUS on CHGIN and never settles at all.
+ */
 static irqreturn_t max77705_aicl_irq(int irq, void *irq_drv_data)
 {
 	struct max77705_charger_data *chg = irq_drv_data;
-	unsigned int regval, irq_status;
-	int err;
 
-	err = regmap_read(chg->regmap, MAX77705_CHG_REG_INT_OK, &irq_status);
-	if (err < 0)
-		return IRQ_HANDLED;
-
-	// irq is fiered at the end of current decrease sequence too
-	// early check AICL_I bit to guard against that excess irq call
-	while (!(irq_status & BIT(MAX77705_AICL_I))) {
-		err = regmap_field_read(chg->rfield[MAX77705_CHG_CHGIN_LIM], &regval);
-		if (err < 0)
-			return IRQ_HANDLED;
-
-		regval--;
-
-		err = regmap_field_write(chg->rfield[MAX77705_CHG_CHGIN_LIM], regval);
-		if (err < 0)
-			return IRQ_HANDLED;
-
-		msleep(AICL_WORK_DELAY_MS);
-
-		err = regmap_read(chg->regmap, MAX77705_CHG_REG_INT_OK, &irq_status);
-		if (err < 0)
-			return IRQ_HANDLED;
-	}
+	power_supply_changed(chg->psy_chg);
 
 	return IRQ_HANDLED;
 }
@@ -78,6 +63,15 @@ static irqreturn_t max77705_chgin_irq(int irq, void *irq_drv_data)
 	struct max77705_charger_data *chg = irq_drv_data;
 
 	queue_work(chg->wqueue, &chg->chgin_work);
+
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t max77705_wcin_irq(int irq, void *irq_drv_data)
+{
+	struct max77705_charger_data *chg = irq_drv_data;
+
+	mod_delayed_work(chg->wqueue, &chg->wcin_work, 0);
 
 	return IRQ_HANDLED;
 }
@@ -102,6 +96,66 @@ static const struct regmap_irq_chip max77705_charger_irq_chip = {
 	.num_irqs		= ARRAY_SIZE(max77705_charger_irqs),
 };
 
+/*
+ * OTG VBUS: the boost and OTG bits are added to the current mode nibble
+ * (buck + charge 0x5 -> 0xf, buck 0x4 -> 0xe) and removed again, so the
+ * system buck and charging state are kept. The boost drives the pins
+ * CHGIN is fed from; it is refused while a charger input is present.
+ */
+static int max77705_otg_enable(struct regulator_dev *rdev)
+{
+	struct max77705_charger_data *chg = rdev_get_drvdata(rdev);
+	unsigned int val;
+	int err;
+
+	err = regmap_read(chg->regmap, MAX77705_CHG_REG_INT_OK, &val);
+	if (err)
+		return err;
+
+	if (val & MAX77705_CHGIN_OK)
+		return -EBUSY;
+
+	return regmap_field_update_bits(chg->rfield[MAX77705_MODE],
+					MAX77705_OTG_CTRL, MAX77705_OTG_CTRL);
+}
+
+static int max77705_otg_disable(struct regulator_dev *rdev)
+{
+	struct max77705_charger_data *chg = rdev_get_drvdata(rdev);
+
+	return regmap_field_update_bits(chg->rfield[MAX77705_MODE],
+					MAX77705_OTG_CTRL, 0);
+}
+
+static int max77705_otg_is_enabled(struct regulator_dev *rdev)
+{
+	struct max77705_charger_data *chg = rdev_get_drvdata(rdev);
+	unsigned int mode;
+	int err;
+
+	err = regmap_field_read(chg->rfield[MAX77705_MODE], &mode);
+	if (err)
+		return err;
+
+	return (mode & MAX77705_OTG_CTRL) == MAX77705_OTG_CTRL;
+}
+
+static const struct regulator_ops max77705_otg_ops = {
+	.enable		= max77705_otg_enable,
+	.disable	= max77705_otg_disable,
+	.is_enabled	= max77705_otg_is_enabled,
+};
+
+static const struct regulator_desc max77705_otg_desc = {
+	.name		= "usb-otg-vbus",
+	.of_match	= "usb-otg-vbus",
+	.type		= REGULATOR_VOLTAGE,
+	.owner		= THIS_MODULE,
+	.ops		= &max77705_otg_ops,
+	.fixed_uV	= 5000000,
+	.n_voltages	= 1,
+};
+
 static int max77705_charger_enable(struct max77705_charger_data *chg)
 {
 	int rv;
@@ -118,6 +172,9 @@ static void max77705_charger_disable(void *data)
 	struct max77705_charger_data *chg = data;
 	int rv;
 
+	/* no boost without an owner once the regulator is gone */
+	regmap_field_update_bits(chg->rfield[MAX77705_MODE], MAX77705_OTG_CTRL, 0);
+
 	rv = regmap_field_write(chg->rfield[MAX77705_CHG_EN], MAX77705_CHG_DISABLE);
 	if (rv)
 		dev_err(chg->dev, "unable to disable the charger: %d\n", rv);
@@ -132,7 +189,7 @@ static int max77705_get_online(struct regmap *regmap, int *val)
 	if (ret < 0)
 		return ret;
 
-	*val = !!(data & MAX77705_CHGIN_OK);
+	*val = !!(data & (MAX77705_CHGIN_OK | MAX77705_WCIN_OK));
 
 	return 0;
 }
@@ -316,12 +373,14 @@ static int max77705_get_battery_health(struct max77705_charger_data *chg,
 static int max77705_get_health(struct max77705_charger_data *chg, int *val)
 {
 	struct regmap *regmap = chg->regmap;
-	int ret, is_online = 0;
+	unsigned int ok;
+	int ret;
 
-	ret = max77705_get_online(regmap, &is_online);
+	/* the DETAILS_00 input state is CHGIN's; a wireless input has none */
+	ret = regmap_read(regmap, MAX77705_CHG_REG_INT_OK, &ok);
 	if (ret)
 		return ret;
-	if (is_online) {
+	if (ok & MAX77705_CHGIN_OK) {
 		ret = max77705_get_vbus_state(regmap, val);
 		if (ret || (*val != POWER_SUPPLY_HEALTH_GOOD))
 			return ret;
@@ -345,6 +404,31 @@ static int max77705_get_input_current(struct max77705_charger_data *chg,
 	*val = get_current;
 
 	return 0;
+}
+
+/*
+ * The fast-charge ceiling: the battery's constant-charge-current-max when
+ * it gives one, and never past the 6-bit CHG_CC field (63 x 50 mA).
+ */
+static int max77705_charge_current_max(struct max77705_charger_data *chg)
+{
+	int max = 63 * MAX77705_CURRENT_CHG_STEP;
+
+	if (chg->bat_info && chg->bat_info->constant_charge_current_max_ua > 0)
+		max = min(max, chg->bat_info->constant_charge_current_max_ua);
+
+	return max;
+}
+
+static int max77705_set_input_current(struct max77705_charger_data *chg, int val)
+{
+	unsigned int regval;
+
+	/* CHGIN_LIM code n limits the input to (n + 1) x 25 mA */
+	regval = clamp_val(val, MAX77705_CURRENT_CHGIN_MIN, MAX77705_CURRENT_CHGIN_MAX) /
+		 MAX77705_CURRENT_CHGIN_STEP - 1;
+
+	return regmap_field_write(chg->rfield[MAX77705_CHG_CHGIN_LIM], regval);
 }
 
 static int max77705_get_charge_current(struct max77705_charger_data *chg,
@@ -438,16 +522,12 @@ static int max77705_set_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
 		err = max77705_set_integer(chg, MAX77705_CHG_CC_LIM,
 					   MAX77705_CURRENT_CHGIN_MIN,
-					   MAX77705_CURRENT_CHGIN_MAX,
+					   max77705_charge_current_max(chg),
 					   MAX77705_CURRENT_CHG_STEP,
 					   val->intval);
 		break;
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
-		err = max77705_set_integer(chg, MAX77705_CHG_CHGIN_LIM,
-					   MAX77705_CURRENT_CHGIN_MIN,
-					   MAX77705_CURRENT_CHGIN_MAX,
-					   MAX77705_CURRENT_CHGIN_STEP,
-					   val->intval);
+		err = max77705_set_input_current(chg, val->intval);
 		break;
 	default:
 		err = -EINVAL;
@@ -486,6 +566,48 @@ static void max77705_chgin_isr_work(struct work_struct *work)
 	power_supply_changed(chg->psy_chg);
 }
 
+/*
+ * Wireless (WCIN, fed by the IDT receiver): the receiver's own firmware runs
+ * the Qi link at 5 V, the charger only limits what it takes. Stock starts at
+ * 480 mA and steps up, so a weak pad is not overloaded the moment it starts.
+ */
+static void max77705_wcin_work(struct work_struct *work)
+{
+	struct max77705_charger_data *chg =
+		container_of(to_delayed_work(work), struct max77705_charger_data, wcin_work);
+	unsigned int ok;
+	int ma;
+
+	if (regmap_read(chg->regmap, MAX77705_CHG_REG_INT_OK, &ok))
+		return;
+
+	if (!(ok & MAX77705_WCIN_OK))
+		ma = MAX77705_WCIN_START_MA;
+	else if (!chg->wcin_ma)
+		ma = MAX77705_WCIN_START_MA;
+	else
+		ma = min(chg->wcin_ma + MAX77705_WCIN_STEP_MA, MAX77705_WCIN_MAX_MA);
+
+	if (ma != chg->wcin_ma || !(ok & MAX77705_WCIN_OK))
+		regmap_update_bits(chg->regmap, MAX77705_CHG_REG_CNFG_10,
+				   MAX77705_WCIN_LIM_MASK, MAX77705_WCIN_LIM(ma));
+
+	if (!(ok & MAX77705_WCIN_OK)) {
+		if (chg->wcin_ma)
+			dev_info(chg->dev, "wireless input gone\n");
+		chg->wcin_ma = 0;
+	} else {
+		if (!chg->wcin_ma)
+			dev_info(chg->dev, "wireless input present\n");
+		chg->wcin_ma = ma;
+		if (ma < MAX77705_WCIN_MAX_MA)
+			queue_delayed_work(chg->wqueue, &chg->wcin_work,
+					   msecs_to_jiffies(MAX77705_WCIN_STEP_MS));
+	}
+
+	power_supply_changed(chg->psy_chg);
+}
+
 static int max77705_charger_initialize(struct max77705_charger_data *chg)
 {
 	struct power_supply_battery_info *info;
@@ -505,6 +627,15 @@ static int max77705_charger_initialize(struct max77705_charger_data *chg)
 		goto err;
 
 	err = regmap_field_write(chg->rfield[MAX77705_LX_SLOPE], MAX77705_SLOWEST_LX_SLOPE);
+	if (err)
+		goto err;
+
+	/*
+	 * Input voltage regulation (AICL) is the hardware's; a factory flow
+	 * can leave it disabled (CNFG_06 DIS_AICL), stock clears it too.
+	 */
+	err = regmap_update_bits(regmap, MAX77705_CHG_REG_CNFG_06,
+				 MAX77705_DIS_AICL_MASK, 0);
 	if (err)
 		goto err;
 
@@ -553,13 +684,33 @@ static int max77705_charger_initialize(struct max77705_charger_data *chg)
 	if (err)
 		goto err;
 
-	/* cv voltage 4.2V or 4.35V */
-	/* MINVSYS 3.6V(default) */
-	if (info->voltage_max_design_uv < 0) {
-		dev_warn(chg->dev, "missing battery:voltage-max-design-microvolt\n");
-		max77705_set_float_voltage(chg, 4200000);
+	/*
+	 * cv voltage: the battery's charge voltage if given, else its
+	 * design maximum, else 4.2V. MINVSYS 3.6V(default)
+	 */
+	if (info->constant_charge_voltage_max_uv > 0) {
+		err = max77705_set_float_voltage(chg, info->constant_charge_voltage_max_uv);
+	} else if (info->voltage_max_design_uv > 0) {
+		err = max77705_set_float_voltage(chg, info->voltage_max_design_uv);
 	} else {
-		max77705_set_float_voltage(chg, info->voltage_max_design_uv);
+		dev_warn(chg->dev, "missing battery:voltage-max-design-microvolt\n");
+		err = max77705_set_float_voltage(chg, 4200000);
+	}
+	if (err)
+		goto err;
+
+	/*
+	 * fast-charge current from the battery, else left as found; the
+	 * 6-bit CHG_CC field tops out at 63 x 50 mA
+	 */
+	if (info->constant_charge_current_max_ua > 0) {
+		err = max77705_set_integer(chg, MAX77705_CHG_CC_LIM,
+					   MAX77705_CURRENT_CHGIN_MIN,
+					   max77705_charge_current_max(chg),
+					   MAX77705_CURRENT_CHG_STEP,
+					   info->constant_charge_current_max_ua);
+		if (err)
+			goto err;
 	}
 
 	err = regmap_field_write(chg->rfield[MAX77705_VCHGIN], MAX77705_VCHGIN_4_5);
@@ -567,6 +718,18 @@ static int max77705_charger_initialize(struct max77705_charger_data *chg)
 		goto err;
 
 	err = regmap_field_write(chg->rfield[MAX77705_WCIN], MAX77705_WCIN_4_5);
+	if (err)
+		goto err;
+
+	/* take both inputs (stock keeps WCINSEL and CHGINSEL set) */
+	err = regmap_update_bits(regmap, MAX77705_CHG_REG_CNFG_12,
+				 MAX77705_WCINSEL | MAX77705_CHGINSEL,
+				 MAX77705_WCINSEL | MAX77705_CHGINSEL);
+	if (err)
+		goto err;
+
+	err = regmap_update_bits(regmap, MAX77705_CHG_REG_CNFG_10, MAX77705_WCIN_LIM_MASK,
+				 MAX77705_WCIN_LIM(MAX77705_WCIN_START_MA));
 	if (err)
 		goto err;
 
@@ -599,6 +762,8 @@ err:
 static int max77705_charger_probe(struct i2c_client *i2c)
 {
 	struct power_supply_config pscfg = {};
+	struct regulator_config rcfg = {};
+	struct regulator_dev *rdev;
 	struct max77705_charger_data *chg;
 	struct regmap_irq_chip *chip_desc;
 	struct device *dev;
@@ -665,6 +830,19 @@ static int max77705_charger_probe(struct i2c_client *i2c)
 	if (ret)
 		return ret;
 
+	ret = devm_delayed_work_autocancel(dev, &chg->wcin_work, max77705_wcin_work);
+	if (ret)
+		return ret;
+
+	ret = devm_request_threaded_irq(dev, regmap_irq_get_virq(irq_data, MAX77705_WCIN_I),
+					NULL, max77705_wcin_irq,
+					IRQF_TRIGGER_NONE,
+					"wcin-irq", chg);
+	if (ret)
+		return ret;
+	/* a pad the phone was already lying on */
+	queue_delayed_work(chg->wqueue, &chg->wcin_work, 0);
+
 	ret = devm_request_threaded_irq(dev, regmap_irq_get_virq(irq_data, MAX77705_AICL_I),
 					NULL, max77705_aicl_irq,
 					IRQF_TRIGGER_NONE,
@@ -676,6 +854,12 @@ static int max77705_charger_probe(struct i2c_client *i2c)
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to enable charge\n");
 
+	rcfg.dev = dev;
+	rcfg.driver_data = chg;
+	rdev = devm_regulator_register(dev, &max77705_otg_desc, &rcfg);
+	if (IS_ERR(rdev))
+		return dev_err_probe(dev, PTR_ERR(rdev), "failed to register OTG regulator\n");
+
 	return devm_add_action_or_reset(dev, max77705_charger_disable, chg);
 }
 
@@ -685,12 +869,24 @@ static const struct of_device_id max77705_charger_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, max77705_charger_of_match);
 
+/*
+ * A reset with the OTG boost running leaves the system unable to come
+ * back up: the boost keeps VBUS alive through the reset. Stop it first.
+ */
+static void max77705_charger_shutdown(struct i2c_client *i2c)
+{
+	struct max77705_charger_data *chg = i2c_get_clientdata(i2c);
+
+	regmap_field_update_bits(chg->rfield[MAX77705_MODE], MAX77705_OTG_CTRL, 0);
+}
+
 static struct i2c_driver max77705_charger_driver = {
 	.driver = {
 		.name = "max77705-charger",
 		.of_match_table = max77705_charger_of_match,
 	},
 	.probe = max77705_charger_probe,
+	.shutdown = max77705_charger_shutdown,
 };
 module_i2c_driver(max77705_charger_driver);
 

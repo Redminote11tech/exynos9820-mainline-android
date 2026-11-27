@@ -6,6 +6,7 @@
  */
 
 /dts-v1/;
+#include <dt-bindings/usb/pd.h>
 #include "exynos9820-common.dtsi"
 
 / {
@@ -409,6 +410,37 @@
 		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
 		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
 		samsung,pin-drv = <0>;
+	};
+};
+
+&max77705_charger {
+	max77705_otg_vbus: usb-otg-vbus {
+		regulator-name = "usb_otg_vbus";
+	};
+};
+
+&hsi2c45 {
+	typec@25 {
+		compatible = "maxim,max77705-usbc";
+		reg = <0x25>;
+		interrupt-parent = <&max77705>;
+		interrupts = <3>;
+		vbus-supply = <&max77705_otg_vbus>;
+		maxim,charger = <&max77705_charger>;
+
+		connector {
+			compatible = "usb-c-connector";
+			label = "USB-C";
+			power-role = "dual";
+			data-role = "dual";
+			try-power-role = "sink";
+			sink-pdos = <PDO_FIXED(5000, 3000, PDO_FIXED_DUAL_ROLE |
+						PDO_FIXED_HIGHER_CAP |
+						PDO_FIXED_USB_COMM |
+						PDO_FIXED_DATA_SWAP)
+				     PDO_FIXED(9000, 1670, 0)>;
+			op-sink-microwatt = <15000000>;
+		};
 	};
 };
 
