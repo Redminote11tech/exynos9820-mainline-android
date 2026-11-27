@@ -30,7 +30,7 @@
 		/* Android boot args. S-Boot normally supplies these; uniLoader
 		 * passes only our DTB, so they live here. hardware=exynos9820
 		 * matches the ROM's fstab.exynos9820 (Samsung platform name). */
-		bootargs = "console=tty0 loglevel=4 printk.devkmsg=on androidboot.hardware=exynos9820 androidboot.super_partition=system androidboot.boot_devices=soc@0/13d60000.ufs androidboot.verifiedbootstate=orange androidboot.selinux=permissive androidboot.serialno=beyond2lte001 firmware_class.path=/vendor/firmware brcmfmac.roamoff=1 brcmfmac.host_wake=gpa0:7 pd_ignore_unused clk_ignore_unused";
+		bootargs = "console=tty0 loglevel=4 printk.devkmsg=on androidboot.hardware=exynos9820 androidboot.super_partition=system androidboot.boot_devices=soc@0/13d60000.ufs androidboot.verifiedbootstate=orange androidboot.selinux=permissive androidboot.serialno=beyond2lte001 firmware_class.path=/vendor/firmware brcmfmac.roamoff=1 brcmfmac.host_wake=gpa0:7 exynos9820_sleep.mode=3 pd_ignore_unused clk_ignore_unused";
 
 		framebuffer0: framebuffer@ca000000 {
 			compatible = "simple-framebuffer";
@@ -115,6 +115,8 @@
 		samsung,pins = "gpg1-0";
 		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
 		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-con-pdn = <EXYNOS_PIN_PDN_PREV>;
+		samsung,pin-pud-pdn = <EXYNOS_PIN_PULL_NONE>;
 	};
 };
 
@@ -130,12 +132,16 @@
 		samsung,pins = "gph1-1";
 		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
 		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-con-pdn = <EXYNOS_PIN_PDN_PREV>;
+		samsung,pin-pud-pdn = <EXYNOS_PIN_PULL_NONE>;
 	};
 
 	rcv_amp_reset: rcv-amp-reset-pins {
 		samsung,pins = "gph1-2";
 		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
 		samsung,pin-pud = <EXYNOS_PIN_PULL_NONE>;
+		samsung,pin-con-pdn = <EXYNOS_PIN_PDN_PREV>;
+		samsung,pin-pud-pdn = <EXYNOS_PIN_PULL_NONE>;
 	};
 };
 
@@ -411,6 +417,10 @@
 		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
 		samsung,pin-drv = <0>;
 	};
+};
+
+&pd_embedded_g3d {
+	status = "disabled";
 };
 
 &usbdrd_dwc3 {

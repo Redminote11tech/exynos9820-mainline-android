@@ -20,6 +20,8 @@
 #include <linux/gpio/consumer.h>
 #include <linux/gpio/machine.h>
 #include <linux/pm_wakeup.h>
+#include <linux/soc/samsung/exynos-pmu.h>
+#include <linux/suspend.h>
 
 #include <soc.h>
 #include <chipcommon.h>
@@ -2995,6 +2997,25 @@ static int brcmf_pcie_pm_enter_D3(struct device *dev)
 }
 
 
+/*
+ * After a SoC sleep the PCIe RC drove PERST# and retrained the link. PERST# resets the
+ * dongle's PCIe core and the BAR0 window, so intmask reads 0, but WL_REG_ON stays on and
+ * the firmware runs on, still associated. The firmware is alive if the word it posted at
+ * the top of its RAM at boot is still the address of its shared area.
+ */
+static __maybe_unused bool brcmf_pcie_alive_after_perst(struct brcmf_pciedev_info *devinfo)
+{
+	u32 posted;
+
+	if (!devinfo->shared.tcm_base_address)
+		return false;
+
+	posted = brcmf_pcie_read_ram32(devinfo, devinfo->ci->ramsize - 4);
+	dev_info(&devinfo->pdev->dev, "after PERST#: shared area at %08x, firmware %s\n", posted,
+		 posted == devinfo->shared.tcm_base_address ? "running" : "gone");
+	return posted == devinfo->shared.tcm_base_address;
+}
+
 static int brcmf_pcie_pm_leave_D3(struct device *dev)
 {
 	struct brcmf_pciedev_info *devinfo;
@@ -3014,8 +3035,44 @@ static int brcmf_pcie_pm_leave_D3(struct device *dev)
 	if (brcmf_pcie_gone(devinfo))
 		return 0;
 
+	/*
+	 * After PERST# the BAR0 window points at chipcommon again, whose register at intmask's offset is not 0:
+	 * select the PCIe2 core first and restore the BAR1 window size as brcmf_pcie_attach() sets it.
+	 */
+	brcmf_pcie_select_core(devinfo, BCMA_CORE_PCIE2);
+	brcmf_pcie_write_reg32(devinfo, BRCMF_PCIE_PCIE2REG_CONFIGADDR, 0x4e0);
+	brcmf_pcie_write_reg32(devinfo, BRCMF_PCIE_PCIE2REG_CONFIGDATA,
+			       brcmf_pcie_read_reg32(devinfo, BRCMF_PCIE_PCIE2REG_CONFIGDATA));
+
+	{
+		u32 intmask = brcmf_pcie_read_reg32(devinfo, devinfo->reginfo->intmask);
+		u32 mbmask = brcmf_pcie_read_reg32(devinfo, devinfo->reginfo->mailboxmask);
+
+		/*
+		 * Reject dead/unrestored BAR0 (0xffffffff) and detect PERST# via mailboxmask
+		 * (0xC34 on BCM4375 rev >= 64, which brcmf_pcie_intr_enable() always sets
+		 * non-zero while running and PERST# resets to 0). After a hard PERST# across
+		 * Exynos 9820 SYS_SLEEP, cleanly re-probe the dongle so its PCIe2 DMA rings
+		 * re-synchronize with the host without timing out on dcmds.
+		 */
+		bool did_perst = exynos9820_pcie_consume_perst();
+
+		if (did_perst ||
+		    intmask == 0xffffffff || mbmask == 0xffffffff || mbmask == 0) {
+			u16 cmd = 0;
+			u32 bar0 = 0;
+
+			pci_read_config_word(devinfo->pdev, PCI_COMMAND, &cmd);
+			pci_read_config_dword(devinfo->pdev, PCI_BASE_ADDRESS_0, &bar0);
+			dev_info(&devinfo->pdev->dev,
+				 "leave_D3: PERST#/reset detected (perst=%d cmd=0x%04x bar0=0x%08x intmask=0x%08x mbmask=0x%08x), reprobing\n",
+				 did_perst, cmd, bar0, intmask, mbmask);
+			goto cleanup;
+		}
+	}
+
 	/* Check if device is still up and running, if so we are ready */
-	if (brcmf_pcie_read_reg32(devinfo, devinfo->reginfo->intmask) != 0) {
+	{
 		brcmf_dbg(PCIE, "Try to wakeup device....\n");
 		/* a ring's doorbell only rings while the bus is up */
 		devinfo->state = BRCMFMAC_PCIE_STATE_UP;
@@ -3039,6 +3096,8 @@ cleanup:
 	err = brcmf_pcie_probe(pdev, NULL);
 	if (err)
 		__brcmf_err(NULL, __func__, "probe after resume failed, err=%d\n", err);
+	else
+		pm_wakeup_event(&pdev->dev, 3000);
 
 	return err;
 }

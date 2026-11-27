@@ -12,17 +12,22 @@
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
+#include <linux/gpio/driver.h>
 #include <linux/interrupt.h>
+#include <linux/iopoll.h>
 #include <linux/irqchip/chained_irq.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/mfd/syscon.h>
 #include <linux/of.h>
 #include <linux/pci.h>
+#include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
 #include <linux/phy/phy.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
+#include <linux/soc/samsung/exynos-pmu.h>
+#include <linux/suspend.h>
 #include <linux/module.h>
 
 #include "pcie-designware.h"
@@ -48,12 +53,22 @@
 #define PCIE_NONSTICKY_RESET		0x024
 #define PCIE_APP_INIT_RESET		0x028
 #define PCIE_APP_LTSSM_ENABLE		0x02c
+#define PCIE_APP_REQ_EXIT_L1		0x040
+#define PCIE_XMIT_PME_TURNOFF		0x04c
 #define PCIE_ELBI_RDLH_LINKUP		0x074
 #define PCIE_ELBI_XMLH_LINKUP		BIT(4)
 #define PCIE_ELBI_LTSSM_ENABLE		0x1
+#define PCIE_APP_REQ_EXIT_L1_MODE	0x0f4
 #define PCIE_ELBI_SLV_AWMISC		0x11c
 #define PCIE_ELBI_SLV_ARMISC		0x120
 #define PCIE_ELBI_SLV_DBI_ENABLE	BIT(21)
+
+#define IRQ_RADM_PM_TO_ACK		BIT(18)
+#define IRQ_LINK_DOWN			BIT(30)
+#define LTSSM_MASK			0x1f
+#define LTSSM_L2_IDLE			0x15
+#define L1_EXIT_HW_MODE			BIT(0)
+#define L1_REQ_NAK_MASTER		BIT(4)
 
 struct exynos_pcie {
 	struct dw_pcie			pci;
@@ -61,6 +76,7 @@ struct exynos_pcie {
 	struct phy			*phy;
 	struct regulator_bulk_data	supplies[2];
 	bool				is_exynos9820;
+	bool				suspended;
 	void __iomem			*phy_base;
 	void __iomem			*pcs_base;
 	void __iomem			*sysreg_base;
@@ -68,6 +84,14 @@ struct exynos_pcie {
 	struct gpio_desc		*perst_gpio;
 	struct gpio_desc		*wl_reg_on_gpio;
 };
+
+static void exynos9820_pcie_phy_pwrdn(struct exynos_pcie *ep)
+{
+	writel(0xfe, ep->phy_base + (0x57 * 4));	/* transceiver */
+	writel(0xc1, ep->phy_base + (0x20 * 4));	/* common */
+	writel(readl(ep->pcs_base + 0x100) | BIT(6), ep->pcs_base + 0x100);
+	writel(readl(ep->pcs_base + 0x104) | BIT(7), ep->pcs_base + 0x104);
+}
 
 static void exynos9820_pcie_phy_init(struct exynos_pcie *ep)
 {
@@ -415,14 +439,16 @@ static int exynos_pcie_host_init(struct dw_pcie_rp *pp)
 	if (ep->is_exynos9820) {
 		u32 val;
 
-		/* Power on BCM4375 WLAN chip via WL_REG_ON */
-		if (ep->wl_reg_on_gpio) {
+		/* Power on BCM4375 WLAN chip via WL_REG_ON (kept on across SoC sleep) */
+		if (ep->wl_reg_on_gpio && !ep->suspended) {
 			gpiod_set_value_cansleep(ep->wl_reg_on_gpio, 1);
 			msleep(250);
 		}
 
 		/* Release PMU PCIe0 PHY isolation (0x071C) */
 		regmap_update_bits(ep->pmureg, 0x071C, BIT(0), 1);
+		if (ep->suspended)
+			exynos9820_pcie_phy_pwrdn(ep);	/* in case suspend's writes did not stick */
 
 		/* Clear PHY all power down */
 		writel(readl(ep->pcs_base + 0x100) & ~BIT(6), ep->pcs_base + 0x100);
@@ -545,6 +571,28 @@ static const struct dw_pcie_ops dw_pcie_ops = {
 	.start_link = exynos_pcie_start_link,
 };
 
+/*
+ * WLAN_REG_ON (gpg0-5) must keep its level in the SoC's power-down mode
+ * (samsung,pin-con-pdn = <3>, pin-pud-pdn = <0>), so the BCM4375 stays powered
+ * through a SoC sleep. Samsung pinconf packs value << 8 | type: CON_PDN 4, PUD_PDN 5.
+ */
+static void exynos9820_pcie_wlan_en_pdn(struct device *dev)
+{
+	struct gpio_device *gdev = gpio_device_find_by_label("gpg0");
+	int ret;
+
+	if (!gdev) {
+		dev_warn(dev, "no gpg0: WLAN_REG_ON drops in a SoC sleep\n");
+		return;
+	}
+	ret = pinctrl_gpio_set_config(gpio_device_get_chip(gdev), 5, (3 << 8) | 4);
+	if (!ret)
+		ret = pinctrl_gpio_set_config(gpio_device_get_chip(gdev), 5, (0 << 8) | 5);
+	gpio_device_put(gdev);
+	if (ret)
+		dev_warn(dev, "WLAN_REG_ON power-down config: %d\n", ret);
+}
+
 static int exynos_pcie_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -579,6 +627,8 @@ static int exynos_pcie_probe(struct platform_device *pdev)
 		ep->wl_reg_on_gpio = devm_gpiod_get_optional(dev, "wl-reg-on", GPIOD_OUT_LOW);
 		if (IS_ERR(ep->wl_reg_on_gpio))
 			return PTR_ERR(ep->wl_reg_on_gpio);
+		if (ep->wl_reg_on_gpio)
+			exynos9820_pcie_wlan_en_pdn(dev);
 
 		ret = devm_clk_bulk_get_all_enabled(dev, &ep->clks);
 		if (ret < 0)
@@ -633,13 +683,79 @@ static void exynos_pcie_remove(struct platform_device *pdev)
 	regulator_bulk_disable(ARRAY_SIZE(ep->supplies), ep->supplies);
 }
 
+static int pad_bit = 15;
+module_param(pad_bit, int, 0644);
+MODULE_PARM_DESC(pad_bit, "TOP_OUT bit (10..19) of the FSYS1 pads' retention, -1: find it");
+
+static int exynos9820_pcie_link_resume(struct exynos_pcie *ep)
+{
+	struct dw_pcie *pci = &ep->pci;
+	struct dw_pcie_rp *pp = &pci->pp;
+	int ret;
+
+	ret = exynos_pcie_host_init(pp);
+	if (!ret)
+		ret = dw_pcie_setup_rc(pp);
+	if (!ret)
+		ret = exynos_pcie_start_link(pci);
+	if (!ret)
+		ret = dw_pcie_wait_for_link(pci);
+	return ret;
+}
+
+static atomic_t exynos9820_pcie_perst_flag = ATOMIC_INIT(0);
+
+bool exynos9820_pcie_consume_perst(void)
+{
+	return atomic_xchg(&exynos9820_pcie_perst_flag, 0) != 0;
+}
+EXPORT_SYMBOL_GPL(exynos9820_pcie_consume_perst);
+
 static int exynos_pcie_suspend_noirq(struct device *dev)
 {
 	struct exynos_pcie *ep = dev_get_drvdata(dev);
+	struct dw_pcie *pci = &ep->pci;
 
-	/* On Exynos 9820 in s2idle, keep the PCIe link up while BCM4375 is in D3. */
-	if (ep->is_exynos9820)
+	if (ep->is_exynos9820) {
+		u32 v;
+
+		/* In s2idle (or dry-run), keep the PCIe link up while BCM4375 is in D3. */
+		if (pm_suspend_target_state == PM_SUSPEND_TO_IDLE ||
+		    !pm_suspend_via_firmware())
+			return 0;
+
+		v = exynos_pcie_readl(pci->elbi_base, PCIE_IRQ_EN_PULSE);
+		exynos_pcie_writel(pci->elbi_base, v & ~IRQ_LINK_DOWN, PCIE_IRQ_EN_PULSE);
+
+		if (exynos_pcie_link_up(pci)) {
+			exynos_pcie_writel(pci->elbi_base, 1, PCIE_APP_REQ_EXIT_L1);
+			v = exynos_pcie_readl(pci->elbi_base, PCIE_APP_REQ_EXIT_L1_MODE);
+			v = (v & ~L1_EXIT_HW_MODE) | L1_REQ_NAK_MASTER;
+			exynos_pcie_writel(pci->elbi_base, v, PCIE_APP_REQ_EXIT_L1_MODE);
+
+			exynos_pcie_writel(pci->elbi_base, IRQ_RADM_PM_TO_ACK, PCIE_IRQ_PULSE);
+			exynos_pcie_writel(pci->elbi_base, 1, PCIE_XMIT_PME_TURNOFF);
+			if (readl_poll_timeout(pci->elbi_base + PCIE_IRQ_PULSE, v,
+					       v & IRQ_RADM_PM_TO_ACK, 10, 20000))
+				dev_warn(dev, "no PME_TO_Ack\n");
+			exynos_pcie_writel(pci->elbi_base, 0, PCIE_XMIT_PME_TURNOFF);
+			if (readl_poll_timeout(pci->elbi_base + PCIE_ELBI_RDLH_LINKUP, v,
+					       (v & LTSSM_MASK) == LTSSM_L2_IDLE, 10, 20000))
+				dev_warn(dev, "no L2/L3 Ready, ltssm %02x\n", v & LTSSM_MASK);
+		}
+
+		/* Stop LTSSM and assert PERST# (active-high GPIO: 0 = asserted) */
+		exynos_pcie_writel(pci->elbi_base, 0, PCIE_APP_LTSSM_ENABLE);
+		if (ep->perst_gpio)
+			gpiod_set_value_cansleep(ep->perst_gpio, 0);
+
+		exynos9820_pcie_phy_pwrdn(ep);
+		/* Isolate PHY again, as the bootloader leaves it */
+		regmap_update_bits(ep->pmureg, 0x071C, BIT(0), 0);
+		ep->suspended = true;
+		atomic_set(&exynos9820_pcie_perst_flag, 1);
 		return 0;
+	}
 
 	exynos_pcie_assert_core_reset(ep);
 	phy_power_off(ep->phy);
@@ -656,8 +772,30 @@ static int exynos_pcie_resume_noirq(struct device *dev)
 	struct dw_pcie_rp *pp = &pci->pp;
 	int ret;
 
-	if (ep->is_exynos9820)
-		return 0;
+	if (ep->is_exynos9820) {
+		int bit = READ_ONCE(pad_bit);
+
+		if (!ep->suspended)
+			return 0;
+
+		if (bit >= 10 && bit <= 19 && exynos9820_sleep_release_pads(BIT(bit)))
+			dev_info(dev, "FSYS1 pads released (TOP_OUT bit %d)\n", bit);
+
+		ret = exynos9820_pcie_link_resume(ep);
+		for (bit = 10; ret && READ_ONCE(pad_bit) < 0 && bit <= 19; bit++) {
+			if (!exynos9820_sleep_release_pads(BIT(bit)))
+				continue;
+			ret = exynos9820_pcie_link_resume(ep);
+			dev_info(dev, "TOP_OUT bit %d released: %s\n",
+				 bit, ret ? "still no link" : "link up");
+			if (!ret)
+				WRITE_ONCE(pad_bit, bit);
+		}
+		ep->suspended = false;
+		if (ret)
+			dev_err(dev, "no link after the SoC sleep: %d\n", ret);
+		return ret;
+	}
 
 	ret = regulator_bulk_enable(ARRAY_SIZE(ep->supplies), ep->supplies);
 	if (ret)

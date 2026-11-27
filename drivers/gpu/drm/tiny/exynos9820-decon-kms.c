@@ -16,11 +16,13 @@
 #include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/mfd/syscon.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/regmap.h>
 
 #include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic_helper.h>
@@ -68,13 +70,50 @@
 #define IDMA_IMG_SIZE			0x0018
 #define IDMA_IN_BASE_ADDR_Y		0x0040
 
-/* DSIM0 command FIFO */
+/* DSIM0 registers */
+#define DSIM_SWRST			0x0004
+#define DSIM_SWRST_RESET		BIT(0)
+#define DSIM_CLK_CTRL			0x0020
+#define DSIM_CLK_CTRL_CLOCK_SEL		BIT(26)
+#define DSIM_CLK_CTRL_TX_REQUEST_HSCLK	BIT(20)
+#define DSIM_CLK_CTRL_WORDCLK_EN	BIT(17)
+#define DSIM_CONFIG			0x004c
+#define DSIM_INTSRC			0x0050
 #define DSIM_PKTHDR			0x0058
 #define DSIM_PAYLOAD			0x005c
+#define DSIM_RXFIFO			0x0060
 #define DSIM_FIFOCTRL			0x0068
 #define DSIM_FULL_PH_SFR		BIT(11)
 #define DSIM_EMPTY_PH_SFR		BIT(10)
 #define DSIM_FULL_PL_SFR		BIT(9)
+
+/* PMU & SYSREG_DPU MIPI D-PHY control */
+#define PMU_MIPI_PHY_M4S4_TOP_CTRL	0x070c
+#define PMU_MIPI_PHY_M4S0_CTRL		0x0710
+#define DISP_DPU_MIPI_PHY_CON		0x0008
+#define DISP_SEL_RESET_DPHY_M4S0	BIT(5)
+#define DISP_M_RESETN_M4S4_MODULE	BIT(1)
+
+/* D-PHY M4S0 registers (0x19161000) */
+#define DSIM_PHY_PLL_CON0		0x0100
+#define DSIM_PHY_PLL_EN			BIT(12)
+#define DSIM_PHY_PLL_STAT0		0x0140
+#define DSIM_PHY_PLL_LOCK		BIT(0)
+#define DSIM_PHY_MC_GNR_CON0		0x0300
+#define DSIM_PHY_MD_GNR_CON0(n)		(0x0400 + 0x100 * (n))
+#define DSIM_PHY_PHY_READY		BIT(1)
+#define DSIM_PHY_PHY_ENABLE		BIT(0)
+
+struct decon_reg_val {
+	u32 off;
+	u32 val;
+};
+
+#define DECON_MAX_SAVED_REGS		512
+#define DPHY_TOP_SAVED_WORDS		8
+#define DPHY_MAX_SAVED_REGS		96
+#define DSIM_MAX_SAVED_REGS		96
+#define IDMA_MAX_SAVED_REGS		128
 
 /* S6E3HA9 (beyond2lte) AOR brightness range from Samsung panel table */
 #define S6E3HA9_AOR_DIMMEST		0x0bc1
@@ -89,6 +128,12 @@ struct decon_kms {
 	void __iomem *decon;
 	void __iomem *idma;
 	void __iomem *dsim;
+	void __iomem *disp_ss;
+	void __iomem *dphy_top;
+	void __iomem *dphy;
+	void __iomem *idma_com;
+	void __iomem *dpp_gf0;
+	struct regmap *pmu;
 	unsigned int win;
 	int irq;
 
@@ -112,6 +157,29 @@ struct decon_kms {
 	u32 boot_base;
 	u32 boot_in_con;
 	u32 boot_src_size;
+	u32 cur_base;
+	u32 cur_in_con;
+	u32 cur_src_size;
+
+	/* S-Boot register snapshots for SYS_SLEEP (BLK_DPU power-cycle) restore */
+	bool has_snapshot;
+	u32 saved_decon_gctl;
+	u32 saved_decon_trig;
+	u32 saved_dsim_clk;
+	u32 saved_dsim_cfg;
+	u32 saved_dphy_top[DPHY_TOP_SAVED_WORDS];
+	struct decon_reg_val saved_dphy[DPHY_MAX_SAVED_REGS];
+	unsigned int nr_saved_dphy;
+	struct decon_reg_val saved_dsim[DSIM_MAX_SAVED_REGS];
+	unsigned int nr_saved_dsim;
+	struct decon_reg_val saved_idma_com[IDMA_MAX_SAVED_REGS];
+	unsigned int nr_saved_idma_com;
+	struct decon_reg_val saved_dpp_gf0[IDMA_MAX_SAVED_REGS];
+	unsigned int nr_saved_dpp_gf0;
+	struct decon_reg_val saved_idma[IDMA_MAX_SAVED_REGS];
+	unsigned int nr_saved_idma;
+	struct decon_reg_val saved_decon[DECON_MAX_SAVED_REGS];
+	unsigned int nr_saved_decon;
 };
 
 static bool psr = true;
@@ -271,6 +339,10 @@ static void decon_scanout(struct decon_kms *dk, u32 base, u32 in_con,
 	if (readl_poll_timeout(dk->decon + DECON_SHADOW_REG_UPDATE_REQ, val,
 			       !val, 100, 50000))
 		drm_warn_once(&dk->drm, "shadow update stuck: 0x%08x\n", val);
+
+	dk->cur_base = base;
+	dk->cur_in_con = in_con;
+	dk->cur_src_size = src_size;
 
 	writel(in_con, dk->idma + IDMA_IN_CON);
 	writel(src_size, dk->idma + IDMA_SRC_SIZE);
@@ -561,6 +633,231 @@ static bool decon_frame_running(struct decon_kms *dk)
 	       (readl(dk->decon + DECON_INTERRUPT_PENDING) & DECON_INT_FRAME_START);
 }
 
+static void decon_save_range(void __iomem *base, u32 start, u32 end,
+			     struct decon_reg_val *dst, unsigned int *cnt,
+			     unsigned int max_cnt,
+			     bool (*skip_fn)(u32 off))
+{
+	u32 off, val;
+
+	for (off = start; off <= end; off += 4) {
+		if (skip_fn && skip_fn(off))
+			continue;
+		val = readl(base + off);
+		if (!val)
+			continue;
+		if (*cnt < max_cnt) {
+			dst[*cnt].off = off;
+			dst[*cnt].val = val;
+			(*cnt)++;
+		}
+	}
+}
+
+static bool skip_dsim_reg(u32 off)
+{
+	switch (off) {
+	case DSIM_SWRST:
+	case DSIM_CLK_CTRL:
+	case DSIM_CONFIG:
+	case DSIM_INTSRC:
+	case DSIM_PKTHDR:
+	case DSIM_PAYLOAD:
+	case DSIM_RXFIFO:
+	case DSIM_FIFOCTRL:
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool skip_dphy_reg(u32 off)
+{
+	return off == DSIM_PHY_PLL_STAT0;
+}
+
+static bool skip_idma_reg(u32 off)
+{
+	/* Skip SW_RESET / IRQ status at 0x0000..0x0004 */
+	return off <= 0x0004;
+}
+
+static bool skip_decon_reg(u32 off)
+{
+	if (off == DECON_GLOBAL_CONTROL ||
+	    off == DECON_INTERRUPT_PENDING ||
+	    off == 0x0050 || /* EXTRA_INTERRUPT_PENDING */
+	    off == DECON_SHADOW_REG_UPDATE_REQ ||
+	    off == DECON_HW_SW_TRIG_CONTROL ||
+	    (off >= 0x0280 && off <= 0x02a4)) /* CRC / FRAME_COUNT */
+		return true;
+	return false;
+}
+
+static void decon_snapshot_boot_state(struct decon_kms *dk)
+{
+	struct device *dev = dk->drm.dev;
+	unsigned int i;
+
+	if (!dk->pmu || !dk->disp_ss || !dk->dphy_top || !dk->dphy ||
+	    !dk->dsim || !dk->idma_com || !dk->dpp_gf0) {
+		dev_info(dev, "S2R snapshot skipped (missing optional DPU blocks)\n");
+		return;
+	}
+
+	dk->saved_decon_gctl = readl(dk->decon + DECON_GLOBAL_CONTROL);
+	dk->saved_decon_trig = readl(dk->decon + DECON_HW_SW_TRIG_CONTROL);
+	dk->saved_dsim_clk = readl(dk->dsim + DSIM_CLK_CTRL);
+	dk->saved_dsim_cfg = readl(dk->dsim + DSIM_CONFIG);
+
+	for (i = 0; i < DPHY_TOP_SAVED_WORDS; i++)
+		dk->saved_dphy_top[i] = readl(dk->dphy_top + i * 4);
+
+	decon_save_range(dk->dphy, 0x0100, 0x0120, dk->saved_dphy, &dk->nr_saved_dphy,
+			 DPHY_MAX_SAVED_REGS, skip_dphy_reg);
+	decon_save_range(dk->dphy, 0x0300, 0x0354, dk->saved_dphy, &dk->nr_saved_dphy,
+			 DPHY_MAX_SAVED_REGS, skip_dphy_reg);
+	for (i = 0; i < 4; i++)
+		decon_save_range(dk->dphy, 0x0400 + i * 0x100, 0x0444 + i * 0x100,
+				 dk->saved_dphy, &dk->nr_saved_dphy,
+				 DPHY_MAX_SAVED_REGS, skip_dphy_reg);
+
+	decon_save_range(dk->dsim, 0x0000, 0x02fc, dk->saved_dsim, &dk->nr_saved_dsim,
+			 DSIM_MAX_SAVED_REGS, skip_dsim_reg);
+	decon_save_range(dk->idma_com, 0x0000, 0x010c, dk->saved_idma_com,
+			 &dk->nr_saved_idma_com, IDMA_MAX_SAVED_REGS, NULL);
+	decon_save_range(dk->dpp_gf0, 0x0000, 0x00fc, dk->saved_dpp_gf0,
+			 &dk->nr_saved_dpp_gf0, IDMA_MAX_SAVED_REGS, skip_idma_reg);
+	decon_save_range(dk->idma, 0x0000, 0x00fc, dk->saved_idma,
+			 &dk->nr_saved_idma, IDMA_MAX_SAVED_REGS, skip_idma_reg);
+
+	decon_save_range(dk->decon, 0x0000, 0x027c, dk->saved_decon, &dk->nr_saved_decon,
+			 DECON_MAX_SAVED_REGS, skip_decon_reg);
+	decon_save_range(dk->decon, 0x1000, 0x15fc, dk->saved_decon, &dk->nr_saved_decon,
+			 DECON_MAX_SAVED_REGS, skip_decon_reg);
+	decon_save_range(dk->decon, 0x2000, 0x24fc, dk->saved_decon, &dk->nr_saved_decon,
+			 DECON_MAX_SAVED_REGS, skip_decon_reg);
+	decon_save_range(dk->decon, 0x4000, 0x41fc, dk->saved_decon, &dk->nr_saved_decon,
+			 DECON_MAX_SAVED_REGS, skip_decon_reg);
+	decon_save_range(dk->decon, 0x5000, 0x51fc, dk->saved_decon, &dk->nr_saved_decon,
+			 DECON_MAX_SAVED_REGS, skip_decon_reg);
+
+	dk->has_snapshot = true;
+	dev_info(dev, "S2R snapshot saved: dphy=%u dsim=%u idma_com=%u dpp=%u idma=%u decon=%u\n",
+		 dk->nr_saved_dphy, dk->nr_saved_dsim, dk->nr_saved_idma_com,
+		 dk->nr_saved_dpp_gf0, dk->nr_saved_idma, dk->nr_saved_decon);
+}
+
+static void decon_restore_cold(struct decon_kms *dk)
+{
+	struct device *dev = dk->drm.dev;
+	unsigned int i;
+	u32 val;
+
+	if (!dk->has_snapshot)
+		return;
+
+	dev_info(dev, "BLK_DPU lost state across SYS_SLEEP, replaying S-Boot display pipeline\n");
+
+	/* 1. Release PMU MIPI D-PHY isolation */
+	regmap_update_bits(dk->pmu, PMU_MIPI_PHY_M4S0_CTRL, BIT(0), BIT(0));
+	regmap_update_bits(dk->pmu, PMU_MIPI_PHY_M4S4_TOP_CTRL, BIT(0), BIT(0));
+
+	/* 2. SYSREG_DPU controls D-PHY reset */
+	rmw(dk->disp_ss, DISP_DPU_MIPI_PHY_CON, DISP_SEL_RESET_DPHY_M4S0, 0);
+
+	/* 3. DSIM0 OSC clock + SW reset */
+	rmw(dk->dsim, DSIM_CLK_CTRL, DSIM_CLK_CTRL_CLOCK_SEL, 0);
+	writel(DSIM_SWRST_RESET, dk->dsim + DSIM_SWRST);
+	if (readl_poll_timeout(dk->dsim + DSIM_SWRST, val, !(val & DSIM_SWRST_RESET),
+			       10, 10000))
+		dev_warn(dev, "DSIM0 SW reset timeout (0x%08x)\n", val);
+
+	writel(dk->saved_dsim_cfg, dk->dsim + DSIM_CONFIG);
+	writel(dk->saved_dsim_clk & ~(DSIM_CLK_CTRL_CLOCK_SEL | DSIM_CLK_CTRL_TX_REQUEST_HSCLK),
+	       dk->dsim + DSIM_CLK_CTRL);
+
+	/* 4. Assert D-PHY module reset */
+	rmw(dk->disp_ss, DISP_DPU_MIPI_PHY_CON, DISP_M_RESETN_M4S4_MODULE, 0);
+
+	/* 5. Restore D-PHY BIAS and M4S0 (with PLL_EN & PHY_ENABLE masked off first) */
+	for (i = 0; i < DPHY_TOP_SAVED_WORDS; i++)
+		writel(dk->saved_dphy_top[i], dk->dphy_top + i * 4);
+
+	for (i = 0; i < dk->nr_saved_dphy; i++) {
+		u32 off = dk->saved_dphy[i].off;
+		u32 v = dk->saved_dphy[i].val;
+
+		if (off == DSIM_PHY_PLL_CON0)
+			v &= ~DSIM_PHY_PLL_EN;
+		else if (off == DSIM_PHY_MC_GNR_CON0 ||
+			 off == DSIM_PHY_MD_GNR_CON0(0) ||
+			 off == DSIM_PHY_MD_GNR_CON0(1) ||
+			 off == DSIM_PHY_MD_GNR_CON0(2) ||
+			 off == DSIM_PHY_MD_GNR_CON0(3))
+			v &= ~(DSIM_PHY_PHY_ENABLE | DSIM_PHY_PHY_READY);
+		writel(v, dk->dphy + off);
+	}
+
+	/* Enable D-PHY PLL and wait for lock */
+	rmw(dk->dphy, DSIM_PHY_PLL_CON0, DSIM_PHY_PLL_EN, DSIM_PHY_PLL_EN);
+	if (readl_poll_timeout(dk->dphy + DSIM_PHY_PLL_STAT0, val,
+			       val & DSIM_PHY_PLL_LOCK, 10, 10000))
+		dev_warn(dev, "D-PHY PLL lock timeout (0x%08x)\n", val);
+
+	/* Enable clock + 4 data lanes and wait for PHY_READY */
+	rmw(dk->dphy, DSIM_PHY_MC_GNR_CON0, DSIM_PHY_PHY_ENABLE, DSIM_PHY_PHY_ENABLE);
+	if (readl_poll_timeout(dk->dphy + DSIM_PHY_MC_GNR_CON0, val,
+			       val & DSIM_PHY_PHY_READY, 10, 10000))
+		dev_warn(dev, "D-PHY MC ready timeout (0x%08x)\n", val);
+	for (i = 0; i < 4; i++) {
+		u32 reg = DSIM_PHY_MD_GNR_CON0(i);
+
+		rmw(dk->dphy, reg, DSIM_PHY_PHY_ENABLE, DSIM_PHY_PHY_ENABLE);
+		if (readl_poll_timeout(dk->dphy + reg, val,
+				       val & DSIM_PHY_PHY_READY, 10, 10000))
+			dev_warn(dev, "D-PHY MD%u ready timeout (0x%08x)\n", i, val);
+	}
+
+	/* 6. Release D-PHY module reset */
+	rmw(dk->disp_ss, DISP_DPU_MIPI_PHY_CON, DISP_M_RESETN_M4S4_MODULE,
+	    DISP_M_RESETN_M4S4_MODULE);
+
+	/* 7. Switch DSIM0 to word clock, replay remaining DSIM0 regs, enable HSCLK */
+	rmw(dk->dsim, DSIM_CLK_CTRL, DSIM_CLK_CTRL_CLOCK_SEL, DSIM_CLK_CTRL_CLOCK_SEL);
+	for (i = 0; i < dk->nr_saved_dsim; i++)
+		writel(dk->saved_dsim[i].val, dk->dsim + dk->saved_dsim[i].off);
+	writel(0xffffffff, dk->dsim + DSIM_INTSRC);
+	writel(dk->saved_dsim_clk, dk->dsim + DSIM_CLK_CTRL);
+
+	/* 8. Restore IDMA_COMMON, DPP_GF0, IDMA_GF0 and active scanout buffer */
+	for (i = 0; i < dk->nr_saved_idma_com; i++)
+		writel(dk->saved_idma_com[i].val, dk->idma_com + dk->saved_idma_com[i].off);
+	for (i = 0; i < dk->nr_saved_dpp_gf0; i++)
+		writel(dk->saved_dpp_gf0[i].val, dk->dpp_gf0 + dk->saved_dpp_gf0[i].off);
+	for (i = 0; i < dk->nr_saved_idma; i++)
+		writel(dk->saved_idma[i].val, dk->idma + dk->saved_idma[i].off);
+	writel(dk->cur_in_con, dk->idma + IDMA_IN_CON);
+	writel(dk->cur_src_size, dk->idma + IDMA_SRC_SIZE);
+	writel(dk->cur_base, dk->idma + IDMA_IN_BASE_ADDR_Y);
+
+	/* 9. Restore DECON0, clear stale IRQs, start DECON0 and latch shadow regs */
+	for (i = 0; i < dk->nr_saved_decon; i++)
+		writel(dk->saved_decon[i].val, dk->decon + dk->saved_decon[i].off);
+	writel(0xffffffff, dk->decon + DECON_INTERRUPT_PENDING);
+	writel(dk->saved_decon_gctl & ~BIT(28), dk->decon + DECON_GLOBAL_CONTROL);
+	writel(DECON_SHADOW_GLOBAL | BIT(dk->win),
+	       dk->decon + DECON_SHADOW_REG_UPDATE_REQ);
+	if (readl_poll_timeout(dk->decon + DECON_GLOBAL_CONTROL, val,
+			       val & BIT(4), 10, 20000))
+		dev_warn(dev, "DECON0 run timeout (0x%08x)\n", val);
+
+	/* Keep TE trigger masked until decon_pm_resume() unmasks it */
+	writel(dk->saved_decon_trig | DECON_HW_TRIG_MASK_DECON,
+	       dk->decon + DECON_HW_SW_TRIG_CONTROL);
+	dk->trig_masked = true;
+}
+
 static int decon_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -600,11 +897,33 @@ static int decon_probe(struct platform_device *pdev)
 	dk->dsim = devm_platform_ioremap_resource_byname(pdev, "dsim");
 	if (IS_ERR(dk->dsim))
 		dk->dsim = NULL;
+	dk->disp_ss = devm_platform_ioremap_resource_byname(pdev, "disp-ss");
+	if (IS_ERR(dk->disp_ss))
+		dk->disp_ss = NULL;
+	dk->dphy_top = devm_platform_ioremap_resource_byname(pdev, "dphy-top");
+	if (IS_ERR(dk->dphy_top))
+		dk->dphy_top = NULL;
+	dk->dphy = devm_platform_ioremap_resource_byname(pdev, "dphy");
+	if (IS_ERR(dk->dphy))
+		dk->dphy = NULL;
+	dk->idma_com = devm_platform_ioremap_resource_byname(pdev, "idma-com");
+	if (IS_ERR(dk->idma_com))
+		dk->idma_com = NULL;
+	dk->dpp_gf0 = devm_platform_ioremap_resource_byname(pdev, "dpp-gf0");
+	if (IS_ERR(dk->dpp_gf0))
+		dk->dpp_gf0 = NULL;
+	dk->pmu = syscon_regmap_lookup_by_phandle(dev->of_node, "samsung,pmu-syscon");
+	if (IS_ERR(dk->pmu))
+		dk->pmu = NULL;
 	dk->display_on = true;
 
 	ret = decon_check_handover(dk);
 	if (ret)
 		return ret;
+	dk->cur_base = dk->boot_base;
+	dk->cur_in_con = dk->boot_in_con;
+	dk->cur_src_size = dk->boot_src_size;
+	decon_snapshot_boot_state(dk);
 
 	dk->width_mm = 70;
 	dk->height_mm = 147;
@@ -735,16 +1054,32 @@ static int decon_pm_resume(struct device *dev)
 {
 	struct decon_kms *dk = dev_get_drvdata(dev);
 	unsigned long flags;
+	bool cold = false;
+
+	if ((readl(dk->decon + DECON_GLOBAL_CONTROL) & DECON_GLOBAL_RUN) !=
+	    DECON_GLOBAL_RUN) {
+		decon_restore_cold(dk);
+		cold = true;
+	}
 
 	spin_lock_irqsave(&dk->trig_lock, flags);
 	dk->sleeping = false;
 	if (dk->trig_masked &&
-	    (dk->trig_frames || dk->trig_vblank || !READ_ONCE(psr))) {
+	    (cold || dk->trig_frames || dk->trig_vblank || !READ_ONCE(psr))) {
 		rmw(dk->decon, DECON_HW_SW_TRIG_CONTROL,
 		    DECON_HW_TRIG_MASK_DECON, 0);
 		dk->trig_masked = false;
 	}
 	spin_unlock_irqrestore(&dk->trig_lock, flags);
+
+	if (cold && dk->dsim && dk->display_on) {
+		mutex_lock(&dk->dsi_lock);
+		dk->display_on = false;
+		s6e3ha9_set_display_locked(dk, true);
+		if (dk->bl)
+			s6e3ha9_set_aor_locked(dk, backlight_get_brightness(dk->bl));
+		mutex_unlock(&dk->dsi_lock);
+	}
 	return 0;
 }
 

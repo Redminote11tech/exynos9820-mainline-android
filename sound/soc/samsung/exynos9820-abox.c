@@ -2704,22 +2704,24 @@ static int abox_probe(struct platform_device *pdev)
 
 	/*
 	 * CMU_AUD as S-Boot left it, the one read before the first power cycle
-	 * (stock reads the same registers at that point, pmucal_local_disable);
-	 * only with the reset mark set, so a fault cannot land in upload mode.
+	 * (stock reads the same registers at that point, pmucal_local_disable).
+	 * Guard with PMU AUD_STATUS (0x1904) so we never read CMU_AUD while
+	 * the AUD power domain is off.
 	 */
 	{
-		unsigned int inform3 = 0;
+		unsigned int aud_stat = 0;
 		int i;
 
-		regmap_read(abox->pmu, PMU_INFORM3, &inform3);
-		if (inform3 == PMU_INFORM3_ARMED) {
+		regmap_read(abox->pmu, 0x1904, &aud_stat);
+		if (aud_stat & 0x1) {
 			for (i = 0; i < ARRAY_SIZE(cmu_aud_qch); i++)
 				abox->qch_boot[i] = readl(abox->cmu + cmu_aud_qch[i]);
 			abox->option_boot = readl(abox->cmu + CMU_CONTROLLER_OPTION);
 			abox->qch_saved = true;
 			abox_log_cmu(abox, "CMU_AUD as S-Boot left it");
 		} else {
-			dev_warn(dev, "reset mark not set yet: CMU_AUD Q-channels not saved\n");
+			dev_warn(dev, "AUD domain off at probe (0x%x): CMU_AUD Q-channels not saved\n",
+				 aud_stat);
 		}
 	}
 

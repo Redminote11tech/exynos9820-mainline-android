@@ -1641,9 +1641,17 @@
 			compatible = "samsung,exynos9820-decon-handover";
 			reg = <0x19030000 0x10000>,
 			      <0x19071000 0x1000>,
-			      <0x19080000 0x1000>;
-			reg-names = "decon", "idma-gf0", "dsim";
+			      <0x19080000 0x1000>,
+			      <0x19011000 0x10>,
+			      <0x19160000 0x100>,
+			      <0x19161000 0x800>,
+			      <0x19070000 0x110>,
+			      <0x19021000 0x1000>;
+			reg-names = "decon", "idma-gf0", "dsim",
+				    "disp-ss", "dphy-top", "dphy",
+				    "idma-com", "dpp-gf0";
 			interrupts = <GIC_SPI 183 IRQ_TYPE_LEVEL_HIGH>;
+			samsung,pmu-syscon = <&pmu_system_controller>;
 			iommus = <&sysmmu_dpud0>;
 			status = "disabled";
 		};

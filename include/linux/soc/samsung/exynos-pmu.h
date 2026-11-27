@@ -37,4 +37,18 @@ static inline struct regmap *exynos_get_pmu_regmap_by_phandle(struct device_node
 }
 #endif
 
+#ifdef CONFIG_EXYNOS9820_SLEEP
+u32 exynos9820_sleep_release_pads(u32 mask);
+bool exynos9820_pcie_consume_perst(void);
+#else
+static inline u32 exynos9820_sleep_release_pads(u32 mask)
+{
+	return 0;
+}
+static inline bool exynos9820_pcie_consume_perst(void)
+{
+	return false;
+}
+#endif
+
 #endif /* __LINUX_SOC_EXYNOS_PMU_H */
