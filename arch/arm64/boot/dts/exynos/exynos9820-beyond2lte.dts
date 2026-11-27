@@ -413,6 +413,18 @@
 	};
 };
 
+&usbdrd_dwc3 {
+	dr_mode = "otg";
+	usb-role-switch;
+	role-switch-default-mode = "peripheral";
+
+	port {
+		usbdrd_dwc3_hs: endpoint {
+			remote-endpoint = <&max77705_typec_hs>;
+		};
+	};
+};
+
 &max77705_charger {
 	max77705_otg_vbus: usb-otg-vbus {
 		regulator-name = "usb_otg_vbus";
@@ -440,6 +452,19 @@
 						PDO_FIXED_DATA_SWAP)
 				     PDO_FIXED(9000, 1670, 0)>;
 			op-sink-microwatt = <15000000>;
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+
+					max77705_typec_hs: endpoint {
+						remote-endpoint = <&usbdrd_dwc3_hs>;
+					};
+				};
+			};
 		};
 	};
 };
