@@ -2963,6 +2963,8 @@ static int brcmf_pcie_pm_enter_D3(struct device *dev)
 	brcmf_dbg(PCIE, "Enter\n");
 
 	bus = dev_get_drvdata(dev);
+	if (!bus)
+		return 0;
 	devinfo = bus->bus_priv.pcie->devinfo;
 
 	brcmf_pcie_fwcon_timer(devinfo, false);
@@ -3026,11 +3028,23 @@ static int brcmf_pcie_pm_leave_D3(struct device *dev)
 	brcmf_dbg(PCIE, "Enter\n");
 
 	bus = dev_get_drvdata(dev);
+	if (!bus)
+		return 0;
 	devinfo = bus->bus_priv.pcie->devinfo;
 	brcmf_dbg(PCIE, "Enter, dev=%p, bus=%p\n", dev, bus);
 
 	if (devinfo->wake_irq > 0 && atomic_xchg(&devinfo->wake_armed, 0))
 		disable_irq(devinfo->wake_irq);
+
+	{
+		bool did_perst = exynos9820_pcie_consume_perst();
+
+		if (did_perst) {
+			dev_info(&devinfo->pdev->dev,
+				 "leave_D3: SYS_SLEEP power-cycled BCM4375, reprobing cleanly\n");
+			goto cleanup;
+		}
+	}
 
 	if (brcmf_pcie_gone(devinfo))
 		return 0;
@@ -3048,25 +3062,15 @@ static int brcmf_pcie_pm_leave_D3(struct device *dev)
 		u32 intmask = brcmf_pcie_read_reg32(devinfo, devinfo->reginfo->intmask);
 		u32 mbmask = brcmf_pcie_read_reg32(devinfo, devinfo->reginfo->mailboxmask);
 
-		/*
-		 * Reject dead/unrestored BAR0 (0xffffffff) and detect PERST# via mailboxmask
-		 * (0xC34 on BCM4375 rev >= 64, which brcmf_pcie_intr_enable() always sets
-		 * non-zero while running and PERST# resets to 0). After a hard PERST# across
-		 * Exynos 9820 SYS_SLEEP, cleanly re-probe the dongle so its PCIe2 DMA rings
-		 * re-synchronize with the host without timing out on dcmds.
-		 */
-		bool did_perst = exynos9820_pcie_consume_perst();
-
-		if (did_perst ||
-		    intmask == 0xffffffff || mbmask == 0xffffffff || mbmask == 0) {
+		if (intmask == 0xffffffff || mbmask == 0xffffffff || mbmask == 0) {
 			u16 cmd = 0;
 			u32 bar0 = 0;
 
 			pci_read_config_word(devinfo->pdev, PCI_COMMAND, &cmd);
 			pci_read_config_dword(devinfo->pdev, PCI_BASE_ADDRESS_0, &bar0);
 			dev_info(&devinfo->pdev->dev,
-				 "leave_D3: PERST#/reset detected (perst=%d cmd=0x%04x bar0=0x%08x intmask=0x%08x mbmask=0x%08x), reprobing\n",
-				 did_perst, cmd, bar0, intmask, mbmask);
+				 "leave_D3: reset detected (cmd=0x%04x bar0=0x%08x intmask=0x%08x mbmask=0x%08x), reprobing\n",
+				 cmd, bar0, intmask, mbmask);
 			goto cleanup;
 		}
 	}

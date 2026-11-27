@@ -439,10 +439,10 @@ static int exynos_pcie_host_init(struct dw_pcie_rp *pp)
 	if (ep->is_exynos9820) {
 		u32 val;
 
-		/* Power on BCM4375 WLAN chip via WL_REG_ON (kept on across SoC sleep) */
-		if (ep->wl_reg_on_gpio && !ep->suspended) {
+		/* Power on BCM4375 WLAN chip via WL_REG_ON (fresh power-cycle on boot and after SYS_SLEEP) */
+		if (ep->wl_reg_on_gpio) {
 			gpiod_set_value_cansleep(ep->wl_reg_on_gpio, 1);
-			msleep(250);
+			msleep(ep->suspended ? 150 : 250);
 		}
 
 		/* Release PMU PCIe0 PHY isolation (0x071C) */
@@ -744,10 +744,12 @@ static int exynos_pcie_suspend_noirq(struct device *dev)
 				dev_warn(dev, "no L2/L3 Ready, ltssm %02x\n", v & LTSSM_MASK);
 		}
 
-		/* Stop LTSSM and assert PERST# (active-high GPIO: 0 = asserted) */
+		/* Stop LTSSM, assert PERST# (active-high GPIO: 0 = asserted), and power off WL_REG_ON */
 		exynos_pcie_writel(pci->elbi_base, 0, PCIE_APP_LTSSM_ENABLE);
 		if (ep->perst_gpio)
 			gpiod_set_value_cansleep(ep->perst_gpio, 0);
+		if (ep->wl_reg_on_gpio)
+			gpiod_set_value_cansleep(ep->wl_reg_on_gpio, 0);
 
 		exynos9820_pcie_phy_pwrdn(ep);
 		/* Isolate PHY again, as the bootloader leaves it */
@@ -778,8 +780,13 @@ static int exynos_pcie_resume_noirq(struct device *dev)
 		if (!ep->suspended)
 			return 0;
 
-		if (bit >= 10 && bit <= 19 && exynos9820_sleep_release_pads(BIT(bit)))
-			dev_info(dev, "FSYS1 pads released (TOP_OUT bit %d)\n", bit);
+		/*
+		 * Release all TOP_OUT pad retention bits (FSYS1 PERST#/CLKREQ# and
+		 * PERIC0 WL_REG_ON gpg0-5) so WL_REG_ON can actually go HIGH before
+		 * link training. All pinctrl_noirq banks have already restored.
+		 */
+		if (exynos9820_sleep_release_pads(GENMASK(19, 10)))
+			dev_info(dev, "TOP_OUT pads released for PCIe/WLAN resume\n");
 
 		ret = exynos9820_pcie_link_resume(ep);
 		for (bit = 10; ret && READ_ONCE(pad_bit) < 0 && bit <= 19; bit++) {
