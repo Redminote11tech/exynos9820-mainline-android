@@ -20,7 +20,7 @@ Booting an unmodified Android 16 custom ROM (Project Infinity X) on the Samsung 
 - **Sensors (`BCM4775` Sensor Hub):** Mainline `bcm4775-shub` IIO driver over `PERIC1` `spi17` (`USI16`) + standalone open-source Android AIDL v3 `ISensors` HAL (`android/sensors_mainline.cpp`) providing Accelerometer (Auto-Rotate), Ambient Light (Auto-Brightness), Proximity, and Compass Heading
 - **Wi-Fi 6 (802.11ax):** Broadcom BCM4375 (`14e4:4475`) over Exynos 9820 PCIe Gen1 x1 + DWC MSI + `brcmfmac` (rev7 IPC `host_cap` negotiation, `ringupd` skip, D2H XOR sync, DMA barriers, 128-byte random seed)
 - **CPU & RAM:** All 8 CPU cores online (4x Cortex-A55 @ 1.95 GHz, 2x Cortex-A75 @ 2.31 GHz, 2x Exynos M4 @ 2.53 GHz) and full 8 GB RAM (`7.4 GB` usable) with Samsung `debug_snapshot` and `ect` memory carveouts properly reserved
-- **Touch & USB:** Samsung `s6sy761` touchscreen (batched `input_sync()` + reliable I2C probe retry) and `max77705` MUIC auto-USB switching (automatic ADB without cable replug)
+- **Touch, USB-PD Fast Charging & OTG:** Samsung `s6sy761` touchscreen (batched `input_sync()`, reliable I2C probe retry, clean S2idle resume) and Maxim `max77705-usbc` Type-C/PD controller (`9V` USB-PD fast charging, AICL floor-bug fix, Qi wireless charging ramp, and `usb-role-switch` for hot-replug ADB + USB OTG host mode)
 
 ## Current Status
 
@@ -32,7 +32,7 @@ Booting an unmodified Android 16 custom ROM (Project Infinity X) on the Samsung 
 | Wi-Fi 6 (`BCM4375` / `brcmfmac`) | Working | 5 GHz 802.11ax, DHCP, NTP clock sync |
 | Touchscreen (`s6sy761`) | Working | Smooth multitouch, reliable boot probe |
 | All 8 CPU Cores + 8 GB RAM | Working | Exynos M4 cores active, reserved memory fixed |
-| Auto-ADB (`max77705` MUIC) | Working | Enumerates on warm boot without replug |
+| USB-PD Fast Charging & Hot-Replug ADB (`max77705-usbc`) | Working | 9V USB-PD contract negotiation, AICL fix, Qi ramp, and `usb-role-switch` (ADB + OTG) |
 | Display Brightness & Screen Off (S6E3HA9) | Working | DSIM0 `0xB1` AOR dimming + `0x28`/`0x29` DPMS |
 | Stereo Speaker Audio (`ABOX` + `CS35L40`) | Working | `hw:0,1` 48 kHz stereo `S32_LE` + custom Android Audio HAL |
 | Hardware Video Codec (`s5p-mfc` v13) | Kernel Working | `/dev/video0` & `/dev/video1` live with `mfc_fw.bin`; V4L2 Codec2 HAL TODO for Android apps |
