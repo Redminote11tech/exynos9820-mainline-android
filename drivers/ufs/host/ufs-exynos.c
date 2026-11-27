@@ -2350,8 +2350,19 @@ static int exynos_ufs_probe(struct platform_device *pdev)
 		vops = drv_data->vops;
 
 	err = ufshcd_pltfrm_init(pdev, vops);
-	if (err)
+	if (err) {
 		dev_err(dev, "ufshcd_pltfrm_init() failed %d\n", err);
+	} else if (of_device_is_compatible(dev->of_node, "samsung,exynos9820-ufs")) {
+		struct ufs_hba *hba = platform_get_drvdata(pdev);
+
+		/*
+		 * Exynos 9820 SYS_SLEEP cuts power to the UFS host controller;
+		 * UFS_PM_LVL_5 (POWERDOWN + LINK_OFF) avoids a ~1s hibern8_exit
+		 * timeout (-110) and register dump on every S2R wake.
+		 */
+		if (hba)
+			hba->spm_lvl = UFS_PM_LVL_5;
+	}
 
 	return err;
 }
